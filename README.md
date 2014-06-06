@@ -342,7 +342,7 @@ Let `inputs` be a 4-dimensional tensor of shape (N, C, H, W) corresponding to N 
 outputs.convolve_and_pool_replace(inputs, argmaxs, filters, pool_radius, stride)
 ```
 first computes the (valid set) convolution of `inputs` and `filters` with stride `stride` over `inputs`, after which it applies max-pooling with pooling radius `pool_radius`. The result is placed in the tensor `outputs` which must be of dimensions (N, K, H_pooled, W_pooled) where H_pooled = ceil((H - Y + 1)/pool_radius) and W_pooled = ceil((W - X + 1)/pool_radius).
-
+```
 
 # License (BSD 3-Clause)
 Copyright (c) 2014, Oren Rippel and Ryan P. Adams
