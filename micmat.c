@@ -25,6 +25,14 @@
 #define ALLOC_FREE alloc_if(1) free_if(1)
 #define REUSE alloc_if(0) free_if(0)
 
+#define ti(a, b, c, d, B, C, D) ((a)*(B)*(C)*(D) + (b)*(C)*(D) + (c)*(D) + (d))
+// #define it(i, dim, B, C, D) do{
+//     if (dim == 0) i / (B*C*D); \
+//     else if (dim == 1) (i % (B*C*D)) / (C*D); \
+//     else if (dim == 2) (i % (C*D)) / D; \
+//     else if (dim == 3) i % D; \
+// } while(0)
+
 void tester(){
   int N = 100000;
   float *A = _mm_malloc(N*sizeof(float), 64);
@@ -99,10 +107,10 @@ void fill_ones(int N, float *restrict A, int offloaded){
   }
 }
 
-// convert linear index to tensor index
-__attribute__((target(mic:MIC_DEV))) int ti(int a, int b, int c, int d, int B, int C, int D){
-    return (a*B*C*D + b*C*D + c*D + d);
-}
+// // convert linear index to tensor index
+// __attribute__((target(mic:MIC_DEV))) int ti(int a, int b, int c, int d, int B, int C, int D){
+//     return (a*B*C*D + b*C*D + c*D + d);
+// }
 
 // convert tensor index to linear index
 __attribute__((target(mic:MIC_DEV))) int it(int i, int dim, int B, int C, int D){
