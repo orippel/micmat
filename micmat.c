@@ -18,6 +18,7 @@
 
 #ifndef MIC_DEV
 #define MIC_DEV 0
+#define ALIGN (64)
 #endif
 
 #define ALLOC alloc_if(1) free_if(0)
@@ -26,17 +27,17 @@
 #define REUSE alloc_if(0) free_if(0)
 
 #define ti(a, b, c, d, B, C, D) ((a)*(B)*(C)*(D) + (b)*(C)*(D) + (c)*(D) + (d))
-// #define it(i, dim, B, C, D) do{
-//     if (dim == 0) i / (B*C*D); \
-//     else if (dim == 1) (i % (B*C*D)) / (C*D); \
-//     else if (dim == 2) (i % (C*D)) / D; \
-//     else if (dim == 3) i % D; \
-// } while(0)
+#define it(s, i, dim, B, C, D) do{ \
+    if (dim == 0) s = i / (B*C*D); \
+    else if (dim == 1) s = (i % (B*C*D)) / (C*D); \
+    else if (dim == 2) s = (i % (C*D)) / D; \
+    else if (dim == 3) s = i % D; \
+} while(0)
 
 void tester(){
   int N = 100000;
-  float *A = _mm_malloc(N*sizeof(float), 64);
-  float *B = _mm_malloc(N*sizeof(float), 64);
+  float *A = _mm_malloc(N*sizeof(float), ALIGN);
+  float *B = _mm_malloc(N*sizeof(float), ALIGN);
 
   #pragma omp parallel for
     for (int n = 0; n < N; n++)
@@ -56,7 +57,7 @@ void tester(){
 
 
 float *allocate_host(int N){
-    // float *A = _mm_malloc(N*sizeof(float), 64);
+    // float *A = _mm_malloc(N*sizeof(float), ALIGN);
     float *A = (float *) malloc(N*sizeof(float));
     if (A == NULL){
         fprintf(stderr, "Out of memory.\n");
@@ -67,6 +68,7 @@ float *allocate_host(int N){
 
 int *allocate_host_int(int N){
     int *A = (int *) malloc(N*sizeof(int));
+    // int *A = _mm_malloc(N*sizeof(int), ALIGN);
     if (A == NULL){
         fprintf(stderr, "Out of memory.\n");
     }
@@ -112,20 +114,20 @@ void fill_ones(int N, float *restrict A, int offloaded){
 //     return (a*B*C*D + b*C*D + c*D + d);
 // }
 
-// convert tensor index to linear index
-__attribute__((target(mic:MIC_DEV))) int it(int i, int dim, int B, int C, int D){
-    int s;
+// // convert tensor index to linear index
+// __attribute__((target(mic:MIC_DEV))) int it(int i, int dim, int B, int C, int D){
+//     int s;
 
-    if (dim == 0) s = i / (B*C*D);
-    else if (dim == 1) s = (i % (B*C*D)) / (C*D);
-    else if (dim == 2) s = (i % (C*D)) / D;
-    else if (dim == 3) s = i % D;
+//     if (dim == 0) s = i / (B*C*D);
+//     else if (dim == 1) s = (i % (B*C*D)) / (C*D);
+//     else if (dim == 2) s = (i % (C*D)) / D;
+//     else if (dim == 3) s = i % D;
 
-    return s;
-}
+//     return s;
+// }
 
 __attribute__((target(mic:MIC_DEV))) float *zeros_mic(int N){
-    // float *restrict A = _mm_malloc(N*sizeof(float), 64);
+    // float *restrict A = _mm_malloc(N*sizeof(float), ALIGN);
     float *restrict A = (float *) malloc(N*sizeof(float));
     
     int i;
@@ -138,7 +140,7 @@ __attribute__((target(mic:MIC_DEV))) float *zeros_mic(int N){
 
 
 __attribute__((target(mic:MIC_DEV))) float *ones_mic(int N){
-    // float *restrict A = _mm_malloc(N*sizeof(float), 64);
+    // float *restrict A = _mm_malloc(N*sizeof(float), ALIGN);
     float *restrict A = (float *)malloc(N*sizeof(float));
     
     int i;
@@ -630,6 +632,16 @@ void push_mic(int N, float *restrict A){
     }
 }
 
+void free_host(int N, float *A){
+    // _mm_free(A);
+    // free(A);
+}
+
+void free_host_int(int N, int *A){
+    // _mm_free(A);
+    free(A);
+}
+
 float *cast_float(int N, int *restrict A, int offloaded){
   float *restrict A_float = allocate_host(N);
 
@@ -638,39 +650,29 @@ float *cast_float(int N, int *restrict A, int offloaded){
   nocopy(A_float:length(N) ALLOC)
   {
     int n;
+    // #pragma vector aligned
     #pragma omp parallel for private(n)
     for (n = 0; n < N; n++) A_float[n] = (float) A[n];
   }
   
-  free(A);
+  free_host_int(N, A);
   return A_float;
 }
 
 int *cast_int(int N, float *restrict A, int offloaded){
   int *restrict A_int = allocate_host_int(N);
-
   #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \
   in(A:length(0) FREE) \
   nocopy(A_int:length(N) ALLOC)
   {
     int n;
+    // #pragma vector aligned
     #pragma omp parallel for private(n)
     for (n = 0; n < N; n++) A_int[n] = (int) A[n];
   }
   
-  free(A);
+  free_host(N, A);
   return A_int;
-}
-
-
-void free_host(int N, float *A){
-    // _mm_free(A);
-    free(A);
-}
-
-void free_host_int(int N, int *A){
-    // _mm_free(A);
-    free(A);
 }
 
 void free_mic(int N, float *restrict A){
@@ -1045,54 +1047,78 @@ void divide(int ROWS_A, int COLS_A, float *restrict A, int ROWS_X, int COLS_X, f
     else printf("Update matrix dimensions don\'t match.");
 }
 
-void update(int ROWS_A, int COLS_A, float *restrict A, int ROWS_X, int COLS_X, float *restrict X, float ALPHA){    
-    if (COLS_X == 1 && ROWS_X > 1){
-        #pragma offload target(mic:MIC_DEV) \ 
-        in(A:length(0) REUSE) \ 
-        in(X:length(0) REUSE)
-        { 
-          float *restrict Y = ones_mic(COLS_A);
-          cblas_sger(CblasRowMajor, ROWS_A, COLS_A, 
-            ALPHA, X, 1, Y, 1, 
-            A, COLS_A);
-          // _mm_free(Y);
-          free(Y);
+void update(int a1, int a2, int a3, int a4, float *A, int b1, int b2, int b3, int b4, float *B, float ALPHA, int offloaded){
+    #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \
+    in(A:length(0) REUSE) \
+    in(B:length(0) REUSE)
+    {
+        int c1234, c1, c2, c3, c4, mod1, mod2, mod3, mod4;
+        #pragma omp parallel for private(c1234, c1, c2, c3, c4, mod1, mod2, mod3, mod4)
+        for (c1234 = 0; c1234 < a1*a2*a3*a4; c1234++){
+            c1 = c1234 / (a2*a3*a4);
+            c2 = (c1234 % (a2*a3*a4)) / (a3*a4);
+            c3 = (c1234 % (a3*a4)) / a4;
+            c4 = c1234 % a4;
+
+            mod1 = (c1 < b1-1) ? c1 : b1-1;
+            mod2 = (c2 < b2-1) ? c2 : b2-1;
+            mod3 = (c3 < b3-1) ? c3 : b3-1;
+            mod4 = (c4 < b4-1) ? c4 : b4-1;
+
+            A[ti(c1, c2, c3, c4, a2, a3, a4)] += ALPHA * B[ti(mod1, mod2, mod3, mod4, b2, b3, b4)];
         }
+
     }
-    else if (ROWS_X == 1 && COLS_X > 1){
-        #pragma offload target(mic:MIC_DEV) \ 
-        in(A:length(0) REUSE) \ 
-        in(X:length(0) REUSE)
-        { 
-          float *restrict Y = ones_mic(ROWS_A);
-          cblas_sger(CblasRowMajor, ROWS_A, COLS_A, 
-            ALPHA, Y, 1, X, 1, 
-            A, COLS_A);
-          // _mm_free(Y);
-          free(Y);
-        }
-    }
-    else if (ROWS_X == 1 && COLS_X == 1){
-        #pragma offload target(mic:MIC_DEV) \ 
-        in(A:length(0) REUSE) \
-        in(X:length(0) REUSE)
-        { 
-          float *restrict Y = ones_mic(ROWS_A*COLS_A);
-          cblas_saxpy(ROWS_A*COLS_A, X[0]*ALPHA, Y, 1, A, 1);
-          // _mm_free(Y);
-          free(Y);
-        }
-    } 
-    else if (ROWS_X == ROWS_A && COLS_X == COLS_A){
-        #pragma offload target(mic:MIC_DEV) \ 
-        in(A:length(0) REUSE) \ 
-        in(X:length(0) REUSE)
-        { 
-            cblas_saxpy(ROWS_A*COLS_A, ALPHA, X, 1, A, 1);
-        }
-    } 
-    else printf("Update matrix dimensions don\'t match.");
 }
+
+// void update(int ROWS_A, int COLS_A, float *restrict A, int ROWS_X, int COLS_X, float *restrict X, float ALPHA){    
+//     if (COLS_X == 1 && ROWS_X > 1){
+//         #pragma offload target(mic:MIC_DEV) \ 
+//         in(A:length(0) REUSE) \ 
+//         in(X:length(0) REUSE)
+//         { 
+//           float *restrict Y = ones_mic(COLS_A);
+//           cblas_sger(CblasRowMajor, ROWS_A, COLS_A, 
+//             ALPHA, X, 1, Y, 1, 
+//             A, COLS_A);
+//           // _mm_free(Y);
+//           free(Y);
+//         }
+//     }
+//     else if (ROWS_X == 1 && COLS_X > 1){
+//         #pragma offload target(mic:MIC_DEV) \ 
+//         in(A:length(0) REUSE) \ 
+//         in(X:length(0) REUSE)
+//         { 
+//           float *restrict Y = ones_mic(ROWS_A);
+//           cblas_sger(CblasRowMajor, ROWS_A, COLS_A, 
+//             ALPHA, Y, 1, X, 1, 
+//             A, COLS_A);
+//           // _mm_free(Y);
+//           free(Y);
+//         }
+//     }
+//     else if (ROWS_X == 1 && COLS_X == 1){
+//         #pragma offload target(mic:MIC_DEV) \ 
+//         in(A:length(0) REUSE) \
+//         in(X:length(0) REUSE)
+//         { 
+//           float *restrict Y = ones_mic(ROWS_A*COLS_A);
+//           cblas_saxpy(ROWS_A*COLS_A, X[0]*ALPHA, Y, 1, A, 1);
+//           // _mm_free(Y);
+//           free(Y);
+//         }
+//     } 
+//     else if (ROWS_X == ROWS_A && COLS_X == COLS_A){
+//         #pragma offload target(mic:MIC_DEV) \ 
+//         in(A:length(0) REUSE) \ 
+//         in(X:length(0) REUSE)
+//         { 
+//             cblas_saxpy(ROWS_A*COLS_A, ALPHA, X, 1, A, 1);
+//         }
+//     } 
+//     else printf("Update matrix dimensions don\'t match.");
+// }
 
 void update_const(int N, float *restrict A, float c){
     #pragma offload target(mic:MIC_DEV) \ 
@@ -1133,7 +1159,7 @@ void fill_bernoulli(int skip_num, int N, float *restrict A, float p){
 
 
 float *dot(int ROWS_A, int COLS_A, int T_A, float *restrict A, int COLS_B, int T_B, float *restrict B){    
-    // float *restrict C = (float *)_mm_malloc(ROWS_A*COLS_B*sizeof(float), 64); 
+    // float *restrict C = (float *)_mm_malloc(ROWS_A*COLS_B*sizeof(float), ALIGN); 
     float *restrict C = allocate_host(ROWS_A*COLS_B);
 
     char TRANSPOSE_A = 'N', TRANSPOSE_B = 'N';
@@ -1249,6 +1275,46 @@ float *sum_axis(int ROWS_A, int COLS_A, float *restrict A, int AXIS){
     return S;
 }
 
+// float *sum_axis(int a1, int a2, int a3, int a4, float *A, int AXIS, int offloaded){
+//     int s1 = a1, s2 = a2, s3 = a3, s4 = a4, mod1, mod2, mod3, mod4;
+//     if (AXIS == 0) s1 = 1;
+//     if (AXIS == 1) s2 = 1;
+//     if (AXIS == 2) s3 = 1;
+//     if (AXIS == 3) s4 = 1;
+//     if (AXIS == -1) s1 = 1, s2 = 1, s3 = 1, s4 = 1;
+
+//     int allocate_size = s1*s2*s3*s4;
+//     if (allocate_size == 1) allocate_size = 2;
+
+//     float *S = allocate_host(allocate_size);
+//     if (offloaded == 1) offload_mic(allocate_size, S);
+//     fill_zeros(allocate_size, S, offloaded);
+
+//     #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \
+//     in(A:length(0) REUSE) \
+//     nocopy(S:length(allocate_size) ALLOC)
+//     {
+//         int c1234, c1, c2, c3, c4;
+//         #pragma omp parallel for private(c1234, c1, c2, c3, c4, mod1, mod2, mod3, mod4)
+//         for (c1234 = 0; c1234 < a1*a2*a3*a4; c1234++){
+//             c1 = c1234 / (a2*a3*a4);
+//             c2 = (c1234 % (a2*a3*a4)) / (a3*a4);
+//             c3 = (c1234 % (a3*a4)) / a4;
+//             c4 = c1234 % a4;
+
+//             mod1 = (c1 < s1-1) ? c1 : s1-1;
+//             mod2 = (c2 < s2-1) ? c2 : s2-1;
+//             mod3 = (c3 < s3-1) ? c3 : s3-1;
+//             mod4 = (c4 < s4-1) ? c4 : s4-1;
+
+//             #pragma omp atomic
+//             S[ti(mod1, mod2, mod3, mod4, s2, s3, s4)] += A[ti(c1, c2, c3, c4, a2, a3, a4)];
+//         }
+//     }
+
+//     return S;
+// }
+
 int *max_axis(int ROWS_A, int COLS_A, float *restrict A, int AXIS){
     int *restrict S;
 
@@ -1282,7 +1348,7 @@ int *max_axis(int ROWS_A, int COLS_A, float *restrict A, int AXIS){
         }
     }
     else if (AXIS == 1){
-        // S = _mm_malloc(ROWS_A*sizeof(float), 64); 
+        // S = _mm_malloc(ROWS_A*sizeof(float), ALIGN); 
         S = allocate_host_int(ROWS_A);
 
         #pragma offload target(mic:MIC_DEV) \ 
@@ -1298,7 +1364,7 @@ int *max_axis(int ROWS_A, int COLS_A, float *restrict A, int AXIS){
         }
     }
     else if (AXIS == 2){
-        // S = _mm_malloc(2*sizeof(float), 64); 
+        // S = _mm_malloc(2*sizeof(float), ALIGN); 
         S = allocate_host_int(2);
 
         #pragma offload target(mic:MIC_DEV) \ 
@@ -1359,75 +1425,155 @@ float sumo(int N, float *restrict A){
         return S;
 }
 
-int *convolve_and_pool(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int pool_radius, int stride, int *ARGMAXS, int argmaxs_fixed){
+int *convolve_and_pool(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int pooling_radius, int stride, int *restrict ARGMAXS, int argmaxs_fixed, int offloaded){
 
   int output_H = H - Y + 1;
   int output_W = W - X + 1;
-  int pooled_H = ceil(((float) output_H)/pool_radius);
-  int pooled_W = ceil(((float) output_W)/pool_radius);
+  int pooled_H = ceil(((float) output_H)/pooling_radius);
+  int pooled_W = ceil(((float) output_W)/pooling_radius);
 
-  #pragma offload target(mic:MIC_DEV) \ 
+  #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \ 
   in(INPUTS:length(0) REUSE) \ 
   in(FILTERS:length(0) REUSE) \ 
   in(OUTPUTS:length(0) REUSE) \
   in(ARGMAXS:length(0) REUSE)
   {
-      float convolution;
-      int n, k, h, w, c, y, x, lin_index, h_arg, w_arg;
+
+      float convolution = 0.f;
+      float max_convolution = -1.0e10;
+      int argmax_convolution, nkhwcyx, nkij, cyx, n, k, i, j, h, w, c, y, x, lin_index, h_arg, w_arg;
+      int hw, region_H, region_W;
+
       if (argmaxs_fixed == 0){
-          #pragma omp parallel for private(n)
-          for (n = 0; n < N*K*pooled_H*pooled_W; n++) OUTPUTS[n] = -1.0e10;
+          // #pragma omp parallel for private(n)
+          // for (n = 0; n < N*K*pooled_H*pooled_W; n++) OUTPUTS[n] = -1.0e10;
+            #pragma omp parallel for \
+            schedule(dynamic, pooled_W) \
+            default(none) \
+            private(nkij, n, k, i, j, region_H, region_W, hw, h, w, cyx, c, y, x, argmax_convolution, convolution, max_convolution) \
+            shared(pooled_H, pooled_W, H, W, output_H, output_W, Y, X, N, K, C, stride, pooling_radius, INPUTS, OUTPUTS, ARGMAXS, FILTERS)
+          // compute each output element separately
+            for (nkij = 0; nkij < N*K*pooled_H*pooled_W; nkij++){
+                n = nkij / (K*pooled_H*pooled_W);
+                k = (nkij % (K*pooled_H*pooled_W)) / (pooled_H*pooled_W);
+                i = (nkij % (pooled_H*pooled_W)) / pooled_W;
+                j = nkij % pooled_W;
 
-          #pragma omp parallel for collapse(4) private(n, k, h, w, convolution, c, y, x)
-          for (n = 0; n < N; n++){
-              for (k = 0; k < K; k++){                  
-                  // loop over 2D pre-pooled map given n, k
-                  for (h = 0; h < output_H; h += stride){
-                      for (w = 0; w < output_W; w += stride){
-                          // Code needs to not be parallelized from here on; make sure variables are not shared
+                // loop over elements in pooling region
+                region_H = (output_H - i*pooling_radius < pooling_radius) ? output_H - i*pooling_radius : pooling_radius;
+                region_W = (output_W - j*pooling_radius < pooling_radius) ? output_W - j*pooling_radius : pooling_radius;
+                max_convolution = -1.0e10;
 
-                          // compute convolution for a particular set of n, k, h, w
-                          // then push to pooled layer
-                          convolution = 0.f;
-                          for (c = 0; c < C; c++)
-                            for (y = 0; y < Y; y++)
-                              for (x = 0; x < X; x++)
-                                convolution += INPUTS[ti(n, c, h + y, w + x, C, H, W)]
-                                             * FILTERS[ti(k, c, y, x, C, Y, X)];
+                for (hw = 0; hw < region_H*region_W; hw++){
+                    h = hw / region_W;
+                    w = hw % region_W;
 
-                          // #pragma omp critical
-                          if (convolution > OUTPUTS[ti(n, k, h/pool_radius, w/pool_radius, K, pooled_H, pooled_W)]){
-                            OUTPUTS[ti(n, k, h/pool_radius, w/pool_radius, K, pooled_H, pooled_W)] = convolution;
-                            ARGMAXS[ti(n, k, h/pool_radius, w/pool_radius, K, pooled_H, pooled_W)] = ti(n, k, h, w, K, output_H, output_W);
-                          }
+                    // compute convolution for that particular element
+                    convolution = 0.f;
+                    for (cyx = 0; cyx < C*Y*X; cyx++){
+                        c = cyx / (Y*X);
+                        y = (cyx % (Y*X)) / X;
+                        x = cyx % X;
+
+                        convolution += INPUTS[ti(n, c, i*pooling_radius + h + y, j*pooling_radius + w + x, C, H, W)]
+                                     * FILTERS[ti(k, c, y, x, C, Y, X)];
+                    }
+
+                    if (convolution > max_convolution){
+                        max_convolution = convolution;
+                        argmax_convolution = ti(n, k, i*pooling_radius + h, j*pooling_radius + w, K, output_H, output_W);
+                    }
+
+                }
+
+                // THE 2 LINES BELOW
+                OUTPUTS[nkij] = max_convolution;
+                ARGMAXS[nkij] = argmax_convolution;        
+
+            }
+        }
+
+
+      // float convolution;
+      // int outputs_index, nkhw, cyx, n, k, h, w, c, y, x, lin_index, h_arg, w_arg;
+      // if (argmaxs_fixed == 0){
+      //     #pragma omp parallel for private(n)
+      //     for (n = 0; n < N*K*pooled_H*pooled_W; n++) OUTPUTS[n] = -1.0e10;
+
+      //     // #pragma omp parallel for collapse(4) private(n, k, h, w, convolution, c, y, x)
+      //     // for (n = 0; n < N; n++){
+      //         // for (k = 0; k < K; k++){                  
+      //             // // loop over 2D pre-pooled map given n, k
+      //             // for (h = 0; h < output_H; h += stride){
+      //                 // for (w = 0; w < output_W; w += stride){
+
+      // #pragma omp parallel for private(outputs_index, nkhw, cyx, n, k, h, w, convolution, c, y, x)
+      // for (nkhw = 0; nkhw < N*K*output_H*output_W; nkhw++){
+ 
+      //     n = nkhw / (K*output_H*output_W);
+      //     k = (nkhw % (K*output_H*output_W)) / (output_H*output_W);
+      //     h = (nkhw % (output_H*output_W)) / output_W;
+      //     w = nkhw % output_W;
+
+
+      //                     // Code needs to not be parallelized from here on; make sure variables are not shared
+
+      //                     // compute convolution for a particular set of n, k, h, w
+      //                     // then push to pooled layer
+      //                     convolution = 0.f;
+      //                     for (cyx = 0; cyx < C*Y*X; cyx++){
+      //                         c = (cyx % (C*Y*output_W)) / (Y*output_W);
+      //                         y = (cyx % (Y*output_W)) / output_W;
+      //                         x = cyx % output_W;
+      //                     // for (c = 0; c < C; c++)
+      //                       // for (y = 0; y < Y; y++)
+      //                         // for (x = 0; x < X; x++)
+      //                           convolution += INPUTS[ti(n, c, h + y, w + x, C, H, W)]
+      //                                        * FILTERS[ti(k, c, y, x, C, Y, X)];
+      //                     }
+
+      //                     // #pragma omp critical
+      //                     // if (convolution > OUTPUTS[ti(n, k, h/pooling_radius, w/pooling_radius, K, pooled_H, pooled_W)]){
+      //                     //   OUTPUTS[ti(n, k, h/pooling_radius, w/pooling_radius, K, pooled_H, pooled_W)] = convolution;
+      //                     //   ARGMAXS[ti(n, k, h/pooling_radius, w/pooling_radius, K, pooled_H, pooled_W)] = ti(n, k, h, w, K, output_H, output_W);
+      //                     // }
+
+      //                     // outputs_index = ti(n, k, h/pooling_radius, w/pooling_radius, K, pooled_H, pooled_W);
+      //                     if (convolution > OUTPUTS[outputs_index]){
+      //                       OUTPUTS[ti(n, k, h/pooling_radius, w/pooling_radius, K, pooled_H, pooled_W)] = convolution;
+      //                       // ARGMAXS[outputs_index] = ti(n, k, h, w, K, output_H, output_W);
+      //                     }
                         
-                      }
-                  }
-              }
-          }
-      }
+      //                 // }
+      //             // }
+      //         // }
+      //     // }
+
+      //   }
+      // }
 
       else{
           #pragma omp parallel for private(n)
           for (n = 0; n < N*K*pooled_H*pooled_W; n++) OUTPUTS[n] = 0.f;
 
-          #pragma omp parallel for collapse(7) private(n, k, h, w, c, y, x, lin_index, h_arg, w_arg)
+          #pragma omp parallel for private(nkhwcyx, n, k, h, w, c, y, x, lin_index, h_arg, w_arg)
           // loop over pooled elements
-          for (n = 0; n < N; n++)
-              for (k = 0; k < K; k++)
-                    for (h = 0; h < pooled_H; h++)
-                        for (w = 0; w < pooled_W; w++)
-                            // add up convolution
-                              for (c = 0; c < C; c++)
-                                  for (y = 0; y < Y; y++)
-                                      for (x = 0; x < X; x++){
-                                          lin_index = ARGMAXS[ti(n, k, h, w, K, pooled_H, pooled_W)];
-                                          h_arg = it(lin_index, 2, K, output_H, output_W);
-                                          w_arg = it(lin_index, 3, K, output_H, output_W);
-                                          OUTPUTS[ti(n, k, h, w, K, pooled_H, pooled_W)] += INPUTS[ti(n, c, h_arg + y, w_arg + x, C, H, W)]
-                                                       * FILTERS[ti(k, c, y, x, C, Y, X)];
+          for (nkhwcyx = 0; nkhwcyx < N*K*pooled_H*pooled_W*C*Y*X; nkhwcyx++){
+              n = nkhwcyx / (K*pooled_H*pooled_W*C*Y*X);
+                k = (nkhwcyx % (K*pooled_H*pooled_W*C*Y*X)) / (pooled_H*pooled_W*C*Y*X);
+                h = (nkhwcyx % (pooled_H*pooled_W*C*Y*X)) / (pooled_W*C*Y*X);
+                w = (nkhwcyx % (pooled_W*C*Y*X)) / (C*Y*X);
+                c = (nkhwcyx % (C*Y*X)) / (Y*X);
+                y = (nkhwcyx % (Y*X)) / X;
+                x = nkhwcyx % X;
 
-                                      }
+              lin_index = ARGMAXS[ti(n, k, h, w, K, pooled_H, pooled_W)];
+              h_arg = (lin_index % (output_H*output_W)) / output_W;
+              w_arg = lin_index % output_W;
+              OUTPUTS[ti(n, k, h, w, K, pooled_H, pooled_W)] += INPUTS[ti(n, c, h_arg + y, w_arg + x, C, H, W)]
+                           * FILTERS[ti(k, c, y, x, C, Y, X)];
+
+          }
       }
          
   }
@@ -1435,12 +1581,12 @@ int *convolve_and_pool(int N, int C, int H, int W, float *INPUTS, int K, int Y, 
   return ARGMAXS;
 }
 
-void convolve_gradient(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, int *ARGMAXS, float *D_POOLED_OUTPUTS, int pool_radius, float *D_INPUTS, float *D_FILTERS){
+void convolve_gradient(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, int *ARGMAXS, float *D_POOLED_OUTPUTS, int pooling_radius, float *D_INPUTS, float *D_FILTERS){
 
   int output_H = H - Y + 1;
   int output_W = W - X + 1;
-  int pooled_H = ceil(((float) output_H)/pool_radius);
-  int pooled_W = ceil(((float) output_W)/pool_radius);
+  int pooled_H = ceil(((float) output_H)/pooling_radius);
+  int pooled_W = ceil(((float) output_W)/pooling_radius);
 
   #pragma offload target(mic:MIC_DEV) \ 
   in(INPUTS:length(0) REUSE) \ 
@@ -1450,49 +1596,32 @@ void convolve_gradient(int N, int C, int H, int W, float *INPUTS, int K, int Y, 
   in(D_POOLED_OUTPUTS:length(0) REUSE) \
   in(D_FILTERS:length(0) REUSE)
   {
-      int k, c, x, y, n, h, w, h_pooled, w_pooled, lin_index, h_arg, w_arg;
+      int kcxynhw, k, c, x, y, n, h, w, h_pooled, w_pooled, lin_index, h_arg, w_arg;
 
       // filter gradient computation
-      #pragma omp parallel for collapse(7) private(k, c, x, y, n, h_pooled, w_pooled, lin_index, h_arg, w_arg)
+      #pragma omp parallel for private(kcxynhw, k, c, x, y, n, h_pooled, w_pooled, lin_index, h_arg, w_arg)
       // loop over elements of filter
-      for (k = 0; k < K; k++)
-          for (c = 0; c < C; c++)
-              for (x = 0; x < X; x++)
-                  for (y = 0; y < Y; y++)
+      for (kcxynhw = 0; kcxynhw < K*C*X*Y*N*pooled_H*pooled_W; kcxynhw++){
+                k = kcxynhw / (C*X*Y*N*pooled_H*pooled_W);
+                c = (kcxynhw % (C*X*Y*N*pooled_H*pooled_W)) / (X*Y*N*pooled_H*pooled_W);
+                x = (kcxynhw % (X*Y*N*pooled_H*pooled_W)) / (Y*N*pooled_H*pooled_W);
+                y = (kcxynhw % (Y*N*pooled_H*pooled_W)) / (N*pooled_H*pooled_W);
+                n = (kcxynhw % (N*pooled_H*pooled_W)) / (pooled_H*pooled_W);
+                h = (kcxynhw % (pooled_H*pooled_W)) / pooled_W;
+                w = kcxynhw % pooled_W;
 
-                      for (n = 0; n < N; n++)
-                          // loop over 2D map of pooled output
-                          for (h_pooled = 0; h_pooled < pooled_H; h_pooled++)
-                            for (w_pooled = 0; w_pooled < pooled_W; w_pooled++){
-                                // argmax is over the output image
-                                lin_index = ARGMAXS[ti(n, k, h_pooled, w_pooled, K, pooled_H, pooled_W)];
-                                h_arg = it(lin_index, 2, K, output_H, output_W);
-                                w_arg = it(lin_index, 3, K, output_H, output_W);
+                // argmax is over the output image
+                lin_index = ARGMAXS[ti(n, k, h_pooled, w_pooled, K, pooled_H, pooled_W)];
 
-                                D_FILTERS[ti(k, c, y, x, C, Y, X)] += D_POOLED_OUTPUTS[ti(n, k, h_pooled, w_pooled, K, pooled_H, pooled_W)]
-                                       * INPUTS[ti(n, c, h_arg + y, w_arg + x, C, H, W)];
+                h_arg = (lin_index % (output_H*output_W)) / output_W;
+                w_arg = lin_index % output_W;
+                
+                D_FILTERS[ti(k, c, y, x, C, Y, X)] += D_POOLED_OUTPUTS[ti(n, k, h_pooled, w_pooled, K, pooled_H, pooled_W)]
+                       * INPUTS[ti(n, c, h_arg + y, w_arg + x, C, H, W)];
 
-                                D_INPUTS[ti(n, c, h_arg + y, w_arg + x, C, H, W)] += D_POOLED_OUTPUTS[ti(n, k, h_pooled, w_pooled, K, pooled_H, pooled_W)]
-                                       * FILTERS[ti(k, c, y, x, C, Y, X)];
-                            }
-
-      // // input gradient computation
-      // #pragma omp parallel for collapse(7) private(n, c, h_pooled, w_pooled, k, x, y, lin_index, h_arg, w_arg)
-      // // loop over elements of input
-      // for (n = 0; n < N; n++)
-      //     for (c = 0; c < C; c++)
-      //         for (h_pooled = 0; h_pooled < pooled_H; h_pooled++)
-      //             for (w_pooled = 0; w_pooled < pooled_W; w_pooled++)
-      //                 for (k = 0; k < K; k++)
-      //                     for (x = 0; x < X; x++)
-      //                         for (y = 0; y < Y; y++){
-      //                           lin_index = ARGMAXS[ti(n, k, h_pooled, w_pooled, K, pooled_H, pooled_W)];
-      //                           h_arg = it(lin_index, 2, K, output_H, output_W);
-      //                           w_arg = it(lin_index, 3, K, output_H, output_W);
-  
-      //                           D_INPUTS[ti(n, c, h_arg + y, w_arg + x, C, H, W)] += D_POOLED_OUTPUTS[ti(n, k, h_pooled, w_pooled, K, pooled_H, pooled_W)]
-      //                                  * FILTERS[ti(k, c, y, x, C, Y, X)];
-      //                       }
+                D_INPUTS[ti(n, c, h_arg + y, w_arg + x, C, H, W)] += D_POOLED_OUTPUTS[ti(n, k, h_pooled, w_pooled, K, pooled_H, pooled_W)]
+                       * FILTERS[ti(k, c, y, x, C, Y, X)];
+        }
   
   }
 }

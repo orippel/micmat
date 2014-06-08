@@ -122,7 +122,9 @@ cdef extern from "micmat.h":
 
     void free_mic_int(int N, int *A)
 
-    void update(int ROWS_A, int COLS_A, float *A, int ROWS_X, int COLS_X, float *X, float ALPHA)
+    # void update(int ROWS_A, int COLS_A, float *A, int ROWS_X, int COLS_X, float *X, float ALPHA)
+
+    void update(int a1, int a2, int a3, int a4, float *A, int b1, int b2, int b3, int b4, float *B, float ALPHA, int offloaded)
 
     void update_const(int N, float *A, float c)
 
@@ -133,6 +135,7 @@ cdef extern from "micmat.h":
     float *dot_vec(int N, float *A, float *B)
 
     float *sum_axis(int ROWS_A, int COLS_A, float *A, int AXIS)
+    # float *sum_axis(int a1, int a2, int a3, int a4, float *A, int AXIS, int offloaded)
 
     int *max_axis(int ROWS_A, int COLS_A, float *A, int AXIS)
 
@@ -142,7 +145,7 @@ cdef extern from "micmat.h":
 
     void convolve(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int tight)
 
-    int *convolve_and_pool(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int pool_radius, int stride, int *ARGMAXS, int argmaxs_fixed)
+    int *convolve_and_pool(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int pool_radius, int stride, int *ARGMAXS, int argmaxs_fixed, int offloaded)
 
     void convolve_gradient(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, int pool_radius, float *D_INPUTS, float *D_FILTERS)
 

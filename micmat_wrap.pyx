@@ -557,20 +557,24 @@ cdef class MICMat:
         pooled_W = np.ceil((<float> (W - X + 1))/pool_radius)
         
         assert self.shape == (N, K, pooled_H, pooled_W), 'Output shape is ' + self.shape + ' rather than ' + `(N, K, pooled_H, pooled_W)` + '.'
-
         cdef MICMat argmaxs_MICMat
         cdef int argmaxs_fixed = 1
+        times = time.time()
         if argmaxs is None:
             argmaxs_MICMat = MICMat(self.shape)
-            argmaxs_MICMat.offload_mic()
+            if self.offloaded:
+                argmaxs_MICMat.offload_mic()
             argmaxs_MICMat.astype('int')
             argmaxs_fixed = 0
 
         else:
             argmaxs_MICMat = argmaxs
 
-        argmaxs_MICMat.A_int = cmicmat.convolve_and_pool(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, pool_radius, stride, argmaxs_MICMat.A_int, argmaxs_fixed)
-        
+        # print time.time() - times
+
+        times = time.time()
+        argmaxs_MICMat.A_int = cmicmat.convolve_and_pool(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, pool_radius, stride, argmaxs_MICMat.A_int, argmaxs_fixed, self.offloaded)
+        # print time.time() - times
 
         return argmaxs_MICMat
 
@@ -745,12 +749,13 @@ cdef class MICMat:
 
         if type(V) == MICMat:
             V_MICMat = V
-            if V_MICMat.ndim == 2:
-                assert (self.ROWS == V_MICMat.ROWS and self.COLS == V_MICMat.COLS) or (self.ROWS == V_MICMat.ROWS and V_MICMat.COLS == 1) or (V_MICMat.ROWS == 1 and self.COLS == V_MICMat.COLS) or (V_MICMat.ROWS == 1 and V_MICMat.COLS == 1), 'Matrix dimensions ' + `self.shape` + ' and ' + `V.shape` + ' don\'t match in update.'
-                cmicmat.update(self.ROWS, self.COLS, self.A, V_MICMat.ROWS, V_MICMat.COLS, V_MICMat.A, ALPHA)
+            assert self.ndim == V_MICMat.ndim, 'Dimensions ' + `self.ndim` + ' and ' + `V_MICMat.ndim` + ' of MICMats do not match in update.'
+            a1, a2, a3, a4 = tuple([1]*(4 - len(self.shape))) + self.shape
+            b1, b2, b3, b4 = tuple([1]*(4 - len(V_MICMat.shape))) + V_MICMat.shape
+            assert (b1 == a1 or b1 == 1) and (b2 == a2 or b2 == 1) and (b3 == a3 or b3 == 1) and (b4 == a4 or b4 == 1), 'Matrix dimensions ' + `self.shape` + ' and ' + `V_MICMat.shape` + ' don\'t match in update.'
+            assert self.offloaded == V_MICMat.offloaded, 'Both MICMats must be either on the host or on the MIC.'
 
-            else:
-                cmicmat.update(self.size, 1, self.A, V_MICMat.size, 1, V_MICMat.A, ALPHA)
+            cmicmat.update(a1, a2, a3, a4, self.A, b1, b2, b3, b4, V_MICMat.A, ALPHA, self.offloaded)
 
         elif type(V) == np.float32 or type(V) == np.float64 or type(V) == float:
             if type(V) == np.float64:
@@ -811,6 +816,32 @@ cdef class MICMat:
         
         S.offloaded = self.offloaded
         return S 
+
+    # def sum(self, *args):         
+        # cdef MICMat S = MICMat()
+        # cdef int AXIS = -1
+
+        # if not args or args[0] == -1:
+        #     pass 
+
+        # else:
+        #     AXIS = args[0]
+        
+        # a1, a2, a3, a4 = tuple([1]*(4 - len(self.shape))) + self.shape    
+        
+        # if AXIS == -1:
+        #     S.shape = tuple([1]*self.ndim)
+        
+        # else:
+        #     shape = [a1, a2, a3, a4]
+        #     shape = shape[-self.ndim:]
+        #     shape[AXIS] = 1
+        #     S.shape = tuple(shape)
+
+        # S.A = cmicmat.sum_axis(a1, a2, a3, a4, self.A, AXIS, self.offloaded)    
+
+        # S.offloaded = self.offloaded
+        # return S 
 
     def max_and_arg(self, *args):         
         cdef MICMat I = MICMat()
