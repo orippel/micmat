@@ -19,9 +19,13 @@ import subprocess
 
 
 def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride):
-    OUTPUT_PATH = '/global/homes/r/rippel/sota/output/default/'
-    SPECIFIC_MICMAT_PATH = OUTPUT_PATH + 'micmat/'
-    MICMAT_PATH = '/global/homes/r/rippel/sota/micmat/'
+    
+    # OUTPUT_PATH = '/global/homes/r/rippel/sota/output/default/'
+    # SPECIFIC_MICMAT_PATH = OUTPUT_PATH + 'micmat/'
+    # MICMAT_PATH = '/global/homes/r/rippel/sota/micmat/'
+    OUTPUT_PATH = '/project/projectdirs/mantissa/climate/dbn/micmat/'
+    SPECIFIC_MICMAT_PATH = OUTPUT_PATH + 'compilation/'
+    MICMAT_PATH = '/project/projectdirs/mantissa/climate/dbn/micmat/'
     
     print 'Modifying macros file. \n'
     output_H = (H + 2*padding - Y + 1)/stride
