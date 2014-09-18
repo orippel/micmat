@@ -14,8 +14,19 @@ import numpy as np
 cimport numpy as np
 import time
 
+cdef long memory_used_host = 0
+cdef long memory_used_mic = 0
+
+def get_memory_used_host():
+    global memory_used_host
+    return memory_used_host
+
+def get_memory_used_mic():
+    global memory_used_mic
+    return memory_used_mic
+
 cdef class RandGen:
-    cdef public int skip_num
+    cdef public long skip_num
 
     def __cinit__(self):
         self.skip_num = 0
@@ -60,11 +71,15 @@ cdef class MICMat:
         if not args:
             assert self.ROWS * self.COLS > 0, 'MICMat shape not set. Cannot allocate.'
             self.A = cmicmat.allocate_host(self.size)
+            global memory_used_host
+            memory_used_host += 4*self.size
 
         else:
             shape = args[0]
             self.shape = shape
             self.A = cmicmat.allocate_host(self.size)
+            global memory_used_host
+            memory_used_host += 4*self.size
 
         self.dtype = 0
         return self
@@ -81,23 +96,31 @@ cdef class MICMat:
 
     def free_mic_float(self):
         cmicmat.free_mic(self.size, self.A)
+        global memory_used_mic
+        memory_used_mic -= 4*self.size
         self.offloaded = False
         
         return self
 
     def free_mic_int(self):
         cmicmat.free_mic_int(self.size, self.A_int)
+        global memory_used_mic
+        memory_used_mic -= 4*self.size
         self.offloaded = False
         
         return self
 
     def free_host_float(self):
         cmicmat.free_host(self.size, self.A)
+        global memory_used_host
+        memory_used_host -= 4*self.size
         self.shape = (0, 0)
         return self
 
     def free_host_int(self):
         cmicmat.free_host_int(self.size, self.A_int)
+        global memory_used_host
+        memory_used_host -= 4*self.size
         self.shape = (0, 0)
         return self
 
@@ -133,7 +156,8 @@ cdef class MICMat:
             self.free_int()
 
     def __dealloc__(self):
-        if self.size > 0 and not self.persist: 
+        #print self.shape 
+        if self.size > 0 and not self.persist:
             self.free()
 
 
@@ -141,6 +165,8 @@ cdef class MICMat:
     def offload_mic(self):
         if not self.offloaded:
             cmicmat.offload_mic(self.size, self.A)
+            global memory_used_mic
+            memory_used_mic += 4*self.size
             self.offloaded = True
         else:
             cmicmat.push_mic(self.size, self.A)    
@@ -200,7 +226,13 @@ cdef class MICMat:
             if self.size > 0:
                 assert self.size == np.prod(value), 'Assigned shape ' + `value` + ' does not match current shape ' + `self.shape` + '.'
 
+            #global memory_used_host
+            #memory_used_host += np.product(self.shape) - self.size
+
             self.shape = value
+
+            
+
             #self.ROWS = value[0]
             #self.COLS = value[1]
 
@@ -223,6 +255,7 @@ cdef class MICMat:
 
     def astype(self, dtype):
         # we assume that there are only 2 data types... float and int
+
         if dtype == 'float':
             self.A = cmicmat.cast_float(self.size, self.A_int, self.offloaded)
             self.dtype = 0
@@ -428,8 +461,32 @@ cdef class MICMat:
         return self
 
     def fill_bernoulli(self, RandGen stream, float p):
-        cmicmat.fill_bernoulli(stream.skip_num, self.size, self.A, p)
+        cmicmat.fill_bernoulli(stream.skip_num, self.size, self.A_int, p)
         stream.skip_num = stream.skip_num + self.size
+        return self
+
+    def fill_uniform_int(self, RandGen stream, int i_start, int i_end):
+        cmicmat.fill_uniform_int(stream.skip_num, self.size, self.A_int, i_start, i_end)
+        stream.skip_num = stream.skip_num + self.size
+        return self
+
+    def fill_geometric(self, RandGen stream, float p):
+        cmicmat.fill_geometric(stream.skip_num, self.size, self.A, p)
+        stream.skip_num = stream.skip_num + self.size
+        return self
+
+    def fill_nested(self, MICMat geometric_samples):
+        assert geometric_samples.shape[1] == 1 and geometric_samples.shape[0] == self.shape[0], 'Shape of array ' + `self.shape` + ' and shape of geometric sample vector ' + `geometric_samples.shape` + 'don\'t match.'
+        
+        cmicmat.fill_nested(self.shape[0], self.shape[1], self.A, geometric_samples.A)
+        
+        return self
+
+    def apply_dropout(self, MICMat dropout_mask):
+        assert dropout_mask.shape == self.shape, 'Shape of array ' + `self.shape` + ' and shape of mask ' + `dropout_mask.shape` + 'don\'t match.'
+        
+        cmicmat.apply_dropout(self.size, self.A, dropout_mask.A_int)
+        
         return self
 
     def fill_zeros(self):
@@ -442,7 +499,21 @@ cdef class MICMat:
         return self  
 
     def fill_ones(self):
-        cmicmat.fill_ones(self.size, self.A, self.offloaded)
+        if self.dtype == 0:
+            cmicmat.fill_ones(self.size, self.A, self.offloaded)
+
+        elif self.dtype == 1:
+            cmicmat.fill_ones_int(self.size, self.A_int, self.offloaded)
+
+        return self
+
+    def fill_const(self, c):
+        if self.dtype == 0:
+            cmicmat.fill_const(self.size, self.A, <float> c, self.offloaded)
+
+        elif self.dtype == 1:
+            cmicmat.fill_const_int(self.size, self.A_int, <int> c, self.offloaded)
+
         return self
 
 
@@ -548,73 +619,155 @@ cdef class MICMat:
 
 
 ######### matrix operations
-    def convolve_and_pool_replace(self, MICMat inputs, argmaxs, MICMat filters, int pool_radius, int stride):
+    def horizontal_reflection(self, MICMat should_flip, MICMat scratch):
+        N, C, H, W = self.shape[0], self.shape[1], self.shape[2], self.shape[3]
+        assert should_flip.size == N, 'Need should_flip size to be exactly ' + `N` + ', the size of the given tensor.'
+        
+        cmicmat.horizontal_reflection(N, C, H, W, self.A, should_flip.A_int, scratch.A)
+
+    def crop(self, MICMat crop_info, int output_H, int output_W, MICMat outputs):
+        N, C, H, W = self.shape[0], self.shape[1], self.shape[2], self.shape[3]
+        assert crop_info.shape == (N, 2), 'Need crop_info shape to be exactly ' + `(N, 2)` + '.'
+        assert outputs.shape == (N, C, output_H, output_W), 'Need output shape to be exactly ' + `(N, C, output_H, output_W)` + '.'
+
+        cmicmat.crop(N, C, H, W, output_H, output_W, self.A, crop_info.A_int, outputs.A, self.offloaded)
+
+    def convolve_and_pool_replace(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch):
         # asserts that check number of dimensions, sizes, etc
+
         N, C, H, W = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
         K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
 
-        pooled_H = np.ceil((<float> (H - Y + 1))/pool_radius)
-        pooled_W = np.ceil((<float> (W - X + 1))/pool_radius)
+        output_H = (H + 2*padding - Y + 1)/stride
+        output_W = (W + 2*padding - X + 1)/stride
+        pooled_H = (output_H - pooling_radius + 1)/pooling_stride
+        pooled_W = (output_W - pooling_radius + 1)/pooling_stride
         
-        assert self.shape == (N, K, pooled_H, pooled_W), 'Output shape is ' + self.shape + ' rather than ' + `(N, K, pooled_H, pooled_W)` + '.'
-        cdef MICMat argmaxs_MICMat
-        cdef int argmaxs_fixed = 1
-        times = time.time()
-        if argmaxs is None:
-            argmaxs_MICMat = MICMat(self.shape)
-            if self.offloaded:
-                argmaxs_MICMat.offload_mic()
-            argmaxs_MICMat.astype('int')
-            argmaxs_fixed = 0
-
-        else:
-            argmaxs_MICMat = argmaxs
-
-        # print time.time() - times
+        assert self.shape == (N, K, pooled_H, pooled_W), 'Output shape is ' + `self.shape` + ' rather than ' + `(N, K, pooled_H, pooled_W)` + '.'
+        assert argmaxs.shape == (N, K, pooled_H, pooled_W), 'Argmax shape is ' + `self.shape` + ' rather than ' + `(N, K, pooled_H, pooled_W)` + '.'
 
         times = time.time()
-        argmaxs_MICMat.A_int = cmicmat.convolve_and_pool(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, pool_radius, stride, argmaxs_MICMat.A_int, argmaxs_fixed, self.offloaded)
-        # print time.time() - times
+        if layer == 1:
+            start_time = time.time()
+            if not argmaxs_fixed:
+                cmicmat.convolve_and_pool_layer1(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
 
-        return argmaxs_MICMat
+            else:
+                cmicmat.convolve_argmaxs_fixed_layer1(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded)
+        
+        elif layer == 2:
+            if not argmaxs_fixed:
+                cmicmat.convolve_and_pool_layer2(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
+
+            else:
+                cmicmat.convolve_argmaxs_fixed_layer2(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded)
+
+    def local_replace(self, MICMat inputs, MICMat filters, int stride, int padding, layer, MICMat scratch):
+        # asserts that check number of dimensions, sizes, etc
+        N, C, H, W = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
+        K, Y, X = filters.shape[0], filters.shape[-2], filters.shape[-1]
+
+        output_H = (H + 2*padding - Y + 1)/stride
+        output_W = (W + 2*padding - X + 1)/stride        
+        
+        assert self.shape == (N, K, output_H, output_W), 'Output shape is ' + `self.shape` + ' rather than ' + `(N, K, output_H, output_W)` + '.'
+
+        times = time.time()
+        if layer == 1:
+            start_time = time.time()
+            cmicmat.local_layer1(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, stride, padding, self.offloaded, scratch.A)
+        
+        elif layer == 2:
+            cmicmat.local_layer2(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, stride, padding, self.offloaded, scratch.A)
+
+
+    def speed_tester(self, MICMat outputs):
+        cmicmat.speed_tester(self.shape[0], self.A, outputs.A)
+
+    # def convolve_and_pool_replace(self, MICMat inputs, argmaxs, MICMat filters, int pool_radius, int stride, layer):
+    #     # asserts that check number of dimensions, sizes, etc
+    #     N, C, H, W = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
+    #     K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
+
+    #     pooled_H = np.ceil((<float> (H - Y + 1))/pool_radius)
+    #     pooled_W = np.ceil((<float> (W - X + 1))/pool_radius)
+        
+    #     assert self.shape == (N, K, pooled_H, pooled_W), 'Output shape is ' + self.shape + ' rather than ' + `(N, K, pooled_H, pooled_W)` + '.'
+        
+    #     cdef MICMat argmaxs_MICMat
+    #     cdef int argmaxs_fixed = 1
+    #     times = time.time()
+    #     if argmaxs is None:
+    #         argmaxs_MICMat = MICMat(self.shape)
+    #         if self.offloaded:
+    #             argmaxs_MICMat.offload_mic()
+    #         argmaxs_MICMat.astype('int')
+    #         argmaxs_fixed = 0
+
+    #     else:
+    #         argmaxs_MICMat = argmaxs
+
+    #     # print time.time() - times
+
+    #     times = time.time()
+    #     #argmaxs_MICMat.A_int = cmicmat.convolve_and_pool(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, pool_radius, stride, argmaxs_MICMat.A_int, argmaxs_fixed, self.offloaded)
+    #     if layer == 1:
+    #         argmaxs_MICMat.A_int = cmicmat.convolve_and_pool_layer1(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, pool_radius, stride, argmaxs_MICMat.A_int, argmaxs_fixed, self.offloaded)
+        
+    #     elif layer == 2:
+    #         argmaxs_MICMat.A_int = cmicmat.convolve_and_pool_layer2(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, pool_radius, stride, argmaxs_MICMat.A_int, argmaxs_fixed, self.offloaded)
+
+    #     # print time.time() - times
+
+    #     return argmaxs_MICMat
 
     def convolve_gradient(self, MICMat inputs, MICMat filters, MICMat argmaxs,
-        MICMat gradient_pooled_outputs, MICMat gradient_inputs, int pool_radius, int stride):
+        MICMat gradient_pooled_outputs, MICMat gradient_inputs, 
+        int stride, int padding, int pooling_radius, int pooling_stride, layer, MICMat scratch):
+        # self is the filters gradient
+        N, C, H, W = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
+        K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
+
+        # pooled_H = np.ceil((<float> (H - Y + 1))/pool_radius)
+        # pooled_W = np.ceil((<float> (W - X + 1))/pool_radius)
+        output_H = (H + 2*padding - Y + 1)/stride
+        output_W = (W + 2*padding - X + 1)/stride
+        pooled_H = (output_H - pooling_radius + 1)/pooling_stride
+        pooled_W = (output_W - pooling_radius + 1)/pooling_stride
+        
+        assert self.shape == filters.shape, 'Filter shape is ' + self.shape + ' rather than ' + `filters.shape` + '.'
+        assert gradient_inputs.shape == inputs.shape, 'gradient_inputs shape is ' + gradient_inputs.shape + ' rather than ' + `inputs.shape` + '.'
+        assert gradient_pooled_outputs.shape == (N, K, pooled_H, pooled_W), 'gradient_pooled_outputs shape is ' + `gradient_pooled_outputs.shape` + ' rather than ' + `(N, K, pooled_H, pooled_W)` + '.'
+
+        #cmicmat.convolve_gradient(N, C, H, W, inputs.A, K, Y, X, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+            #pool_radius, gradient_inputs.A, self.A)
+        
+        if layer == 1:
+            cmicmat.convolve_gradient_layer1(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+                gradient_inputs.A, self.A, scratch.A)
+
+        elif layer == 2:
+            cmicmat.convolve_gradient_layer2(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+                gradient_inputs.A, self.A, scratch.A)
+
+    def local_gradient(self, MICMat inputs, MICMat filters, MICMat gradient_outputs, MICMat gradient_inputs, int stride, int padding, layer, MICMat scratch):
         # self is the filters gradient
 
         N, C, H, W = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
-        K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
+        K, Y, X = filters.shape[0], filters.shape[-2], filters.shape[-1]
 
-        pooled_H = np.ceil((<float> (H - Y + 1))/pool_radius)
-        pooled_W = np.ceil((<float> (W - X + 1))/pool_radius)
+        output_H = (H + 2*padding - Y + 1)/stride
+        output_W = (W + 2*padding - X + 1)/stride
         
         assert self.shape == filters.shape, 'Filter shape is ' + self.shape + ' rather than ' + `filters.shape` + '.'
-        assert gradient_inputs.shape == inputs.shape, 'Filter shape is ' + gradient_inputs.shape + ' rather than ' + `inputs.shape` + '.'
-        assert gradient_pooled_outputs.shape == (N, K, pooled_H, pooled_W), 'Output shape is ' + `self.shape` + ' rather than ' + `(N, K, pooled_H, pooled_W)` + '.'
+        assert gradient_inputs.shape == inputs.shape, 'gradient_inputs shape is ' + gradient_inputs.shape + ' rather than ' + `inputs.shape` + '.'
+        assert gradient_outputs.shape == (N, K, output_H, output_W), 'gradient_outputs shape is ' + `gradient_outputs.shape` + ' rather than ' + `(N, K, output_H, output_W)` + '.'
 
-        cmicmat.convolve_gradient(N, C, H, W, inputs.A, K, Y, X, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
-            pool_radius, gradient_inputs.A, self.A)
-        
+        if layer == 1:
+            cmicmat.local_gradient_layer1(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, gradient_outputs.A, gradient_inputs.A, self.A, scratch.A)
 
-    def convolve_replace(self, MICMat inputs, MICMat filters, int stride, style):
-        # asserts that check number of dimensions, sizes, etc
-        N, C, H, W = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
-        K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
-
-        cdef int tight
-        # output shape must take into account stride hyperparameters!
-        if style == 'full':
-            assert self.shape == (N, K, H + Y - 1, W + X - 1), 'Output shape is ' + `self.shape` + ' rather than ' + `(N, K, H + Y - 1, W + X - 1)` + '.'
-            tight = 0
-
-        elif style == 'tight':
-            assert self.shape == (N, K, H - Y + 1, W - X + 1), 'Output shape is ' + `self.shape` + ' rather than ' + `(N, K, H - Y + 1, W - X + 1)` + '.'
-            tight = 1
-
-        else:
-            raise NameError('Convolution style not recognized.')
-        
-        cmicmat.convolve(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, tight)
+        elif layer == 2:
+            cmicmat.local_gradient_layer2(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, gradient_outputs.A, gradient_inputs.A, self.A, scratch.A)
 
     def T(self):
         cdef MICMat S = self.deepcopy()
@@ -628,7 +781,7 @@ cdef class MICMat:
         cdef MICMat S
         cdef int T_A = False
         cdef int T_B = False
-        cdef COLS_LEFT, ROWS_RIGHT, ROWS_LEFT, COLS_RIGHT
+        cdef int COLS_LEFT, ROWS_RIGHT, ROWS_LEFT, COLS_RIGHT
 
         if not args:
             pass
@@ -665,7 +818,7 @@ cdef class MICMat:
     # self = M*V
         cdef int T_A = False
         cdef int T_B = False
-        cdef COLS_LEFT, ROWS_RIGHT, ROWS_LEFT, COLS_RIGHT
+        cdef int COLS_LEFT, ROWS_RIGHT, ROWS_LEFT, COLS_RIGHT
 
         if not args:
             pass
@@ -693,7 +846,6 @@ cdef class MICMat:
         assert self.ROWS == ROWS_LEFT and self.COLS == COLS_RIGHT, 'Matrix product of matrices of dimensions ' + `M.shape` + ' and ' + `V.shape` + ' doesn\'t match output MICMat ' + `self.shape` + '.'
         
         cmicmat.dot_replace(M.ROWS, M.COLS, T_A, M.A, V.ROWS, V.COLS, T_B, V.A, 0., self.A)
-
         return self
 
     def dot_replace_update(self, MICMat M, MICMat V, *args):
@@ -750,12 +902,12 @@ cdef class MICMat:
         if type(V) == MICMat:
             V_MICMat = V
             assert self.ndim == V_MICMat.ndim, 'Dimensions ' + `self.ndim` + ' and ' + `V_MICMat.ndim` + ' of MICMats do not match in update.'
-            a1, a2, a3, a4 = tuple([1]*(4 - len(self.shape))) + self.shape
-            b1, b2, b3, b4 = tuple([1]*(4 - len(V_MICMat.shape))) + V_MICMat.shape
-            assert (b1 == a1 or b1 == 1) and (b2 == a2 or b2 == 1) and (b3 == a3 or b3 == 1) and (b4 == a4 or b4 == 1), 'Matrix dimensions ' + `self.shape` + ' and ' + `V_MICMat.shape` + ' don\'t match in update.'
+            a1, a2, a3, a4, a5, a6 = tuple([1]*(6 - len(self.shape))) + self.shape
+            b1, b2, b3, b4, b5, b6  = tuple([1]*(6 - len(V_MICMat.shape))) + V_MICMat.shape
+            assert (b1 == a1 or b1 == 1) and (b2 == a2 or b2 == 1) and (b3 == a3 or b3 == 1) and (b4 == a4 or b4 == 1) and (b5 == a5 or b5 == 1) and (b6 == a6 or b6 == 1), 'Matrix dimensions ' + `self.shape` + ' and ' + `V_MICMat.shape` + ' don\'t match in update.'
             assert self.offloaded == V_MICMat.offloaded, 'Both MICMats must be either on the host or on the MIC.'
 
-            cmicmat.update(a1, a2, a3, a4, self.A, b1, b2, b3, b4, V_MICMat.A, ALPHA, self.offloaded)
+            cmicmat.update(a1, a2, a3, a4, a5, a6, self.A, b1, b2, b3, b4, b5, b6, V_MICMat.A, ALPHA, self.offloaded)
 
         elif type(V) == np.float32 or type(V) == np.float64 or type(V) == float:
             if type(V) == np.float64:
@@ -774,6 +926,7 @@ cdef class MICMat:
                 cmicmat.mult(self.ROWS, self.COLS, self.A, V_MICMat.ROWS, V_MICMat.COLS, V_MICMat.A)
 
             else: # multiply elementwise for tensors
+                assert self.size == V_MICMat.size, 'Tensors multiplied must have same sizes, and instead have shapes ' + `self.shape` + ' and ' + `V_MICMat.shape` + '.'
                 cmicmat.mult(self.size, 1, self.A, V_MICMat.size, 1, V_MICMat.A)                
         
         elif type(V) == np.float32 or type(V) == np.float64 or type(V) == float or type(V) == int:
@@ -815,7 +968,24 @@ cdef class MICMat:
             S.A = cmicmat.sum_axis(self.ROWS, self.COLS, self.A, AXIS)    
         
         S.offloaded = self.offloaded
-        return S 
+        return S
+
+    def sum_replace(self, MICMat A, *args):         
+        cdef int AXIS = 2
+
+        if not args or args[0] == 2:
+            assert self.shape == (1, 1), 'MICMat shape must be (1, 1).'
+        else:
+            AXIS = args[0]
+            if AXIS == 0:
+                assert self.shape == (1, A.COLS), 'MICMat shape must be ' + `(1, A.COLS)` + '.'
+
+            if AXIS == 1:
+                assert self.shape == (A.ROWS, 1), 'MICMat shape must be ' + `(A.ROWS, 1)` + '.'
+            
+            cmicmat.sum_axis_replace(A.ROWS, A.COLS, A.A, AXIS, self.A)    
+        
+        return self 
 
     # def sum(self, *args):         
         # cdef MICMat S = MICMat()
@@ -1074,6 +1244,11 @@ cdef class MICMat:
 
         return S
 
+    def greater_replace(self, float V):
+        cmicmat.greater_replace(self.size, self.A, V)
+
+        return self
+
     def __or__(MICMat self, MICMat V):
         assert self.shape == V.shape, 'The shapes ' + `self.shape` + ' and ' + `V.shape` + ' of the compared MICMats don\'t match.'
         cdef MICMat S = MICMat()
@@ -1133,15 +1308,19 @@ cdef class Scratch(MICMat):
         else:
             return MICMat.__getattr__(self, name)
 
-    def reset(self, MICMat V):
-        self.shapes = []
-        return self.append(V)
+    def reset(self, args):
+        if type(args) == MICMat:
+            self.shapes = []
+            return self.append(args)
+
+        elif type(args) == tuple:
+            self.shapes = [args]
+            return self.get(0)
 
     def append(self, MICMat V):
-        assert self.size >= self.contents_size() + V.size, 'The scratch space is out of memory!'
-
+        assert self.offloaded == V.offloaded, 'Input MICMat must be offloaded to the same resource as the scratch!'
+        assert self.size >= self.contents_size() + V.size, 'The scratch space of size ' + `self.size` + ' is out of memory with contents of size ' + `self.contents_size()` + ' and incoming object of size ' + `V.size` + '!'
         cmicmat.replace_partial_host(self.size, self.contents_size(), self.A, V.size, 0, V.A)
-
         if self.offloaded:
             cmicmat.replace_partial_mic(self.size, self.contents_size(), self.A, V.size, 0, V.A)
 
@@ -1155,7 +1334,6 @@ cdef class Scratch(MICMat):
         S.offloaded = self.offloaded
         S.persist = 1
         S.A = cmicmat.get_partial(S.size, self.contents_size(index), self.A)
-
         return S
 
     def contents_size(self, *args):

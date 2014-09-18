@@ -10,6 +10,8 @@
 cdef extern from "micmat.h":
     void tester()
 
+    void speed_tester(int N, float *INPUTS, float *OUTPUTS)
+
     float *allocate_host(int N)
 
     void zeros(int N, float *A)
@@ -18,13 +20,27 @@ cdef extern from "micmat.h":
 
     void fill_uniform(int skip_num, int N, float *A)
 
-    void fill_bernoulli(int skip_num, int N, float *A, float p)
+    void fill_bernoulli(int skip_num, int N, int *A, float p)
+
+    void fill_uniform_int(int skip_num, int N, int *A, int i_start, int i_end)
+
+    void fill_geometric(int skip_num, int N, float *A, float p)
+
+    void fill_nested(int N, int K, float *A, float *GEOMETRIC_SAMPLES)
+
+    void apply_dropout(int N, float *A, int *MASK)
 
     void fill_zeros(int N, float *A, int offloaded)
 
     void fill_zeros_int(int N, int *A, int offloaded)
 
     void fill_ones(int N, float *A, int offloaded)
+
+    void fill_ones_int(int N, int *A, int offloaded)
+
+    void fill_const(int N, float *A, float c, int offloaded)
+
+    void fill_const_int(int N, int *A, int c, int offloaded)
 
     float *ones_mic(int N)
 
@@ -47,6 +63,8 @@ cdef extern from "micmat.h":
     float *geq(int N, float *A, float B)
 
     float *greater(int N, float *A, float B)
+
+    void greater_replace(int N, float *A, float B)
 
     float *labels_to_vectors(int N, int K, float *A)
 
@@ -124,7 +142,8 @@ cdef extern from "micmat.h":
 
     # void update(int ROWS_A, int COLS_A, float *A, int ROWS_X, int COLS_X, float *X, float ALPHA)
 
-    void update(int a1, int a2, int a3, int a4, float *A, int b1, int b2, int b3, int b4, float *B, float ALPHA, int offloaded)
+    # void update(int a1, int a2, int a3, int a4, float *A, int b1, int b2, int b3, int b4, float *B, float ALPHA, int offloaded)
+    void update(int a1, int a2, int a3, int a4, int a5, int a6, float *A, int b1, int b2, int b3, int b4, int b5, int b6, float *B, float ALPHA, int offloaded)
 
     void update_const(int N, float *A, float c)
 
@@ -135,6 +154,8 @@ cdef extern from "micmat.h":
     float *dot_vec(int N, float *A, float *B)
 
     float *sum_axis(int ROWS_A, int COLS_A, float *A, int AXIS)
+
+    float *sum_axis_replace(int ROWS_A, int COLS_A, float *A, int AXIS, float *S)
     # float *sum_axis(int a1, int a2, int a3, int a4, float *A, int AXIS, int offloaded)
 
     int *max_axis(int ROWS_A, int COLS_A, float *A, int AXIS)
@@ -145,9 +166,33 @@ cdef extern from "micmat.h":
 
     void convolve(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int tight)
 
-    int *convolve_and_pool(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int pool_radius, int stride, int *ARGMAXS, int argmaxs_fixed, int offloaded)
+    void horizontal_reflection(int N, int C, int H, int W, float *INPUTS, int *SHOULD_FLIP, float *scratch)
 
-    void convolve_gradient(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, int pool_radius, float *D_INPUTS, float *D_FILTERS)
+    void crop(int N, int C, int H, int W, int output_W, int output_H, float *INPUTS, int *CROP_INFO, float *OUTPUTS, int offloaded)
+
+    int *convolve_and_pool_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH)
+
+    int *convolve_argmaxs_fixed_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded)
+
+    int *convolve_argmaxs_fixed_layer2(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded)
+    
+    int *convolve_and_pool_layer2(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH)
+
+    void convolve_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH)
+
+    void convolve_gradient_layer2(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH)
+
+    void local_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int stride, int padding, int offloaded, float *SCRATCH)
+
+    void local_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH)
+
+    void local_layer2(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int stride, int padding, int offloaded, float *SCRATCH)
+
+    void local_gradient_layer2(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH)
+
+    # int *convolve_and_pool_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int pool_radius, int stride, int *ARGMAXS, int argmaxs_fixed, int offloaded)
+
+    # int *convolve_and_pool_layer2(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int pool_radius, int stride, int *ARGMAXS, int argmaxs_fixed, int offloaded)
 
     void check_mic_status()
 
