@@ -34,7 +34,7 @@ void fill_geometric(int skip_num, int N, float *A, float p);
 
 void fill_nested(int N, int K, float *A, float *GEOMETRIC_SAMPLES);
 
-void apply_dropout(int N, float *A, int *MASK);
+void apply_dropout(int N, int K, float *A, int *MASK);
 
 void fill_zeros(int N, float *A, int offloaded);
 
@@ -175,7 +175,15 @@ void horizontal_reflection(int N, int C, int H, int W, float *INPUTS, int *SHOUL
 
 void crop(int N, int C, int H, int W, int output_W, int output_H, float *INPUTS, int *CROP_INFO, float *OUTPUTS, int offloaded);
 
+void response_normalization(int N, int K, int H, int W, float *INPUTS, float *OUTPUTS, float ALPHA, float BETA, int local_radius);
+
+void response_normalization_gradient(int N, int K, int H, int W, float *INPUTS, float *OUTPUTS, float *D_INPUTS, float *D_OUTPUTS, float ALPHA, float BETA, int LOCAL_RADIUS);
+
+void convolution_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH);
+
 int *convolve_and_pool_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH);
+
+int *convolve_and_pool_shadow_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH);
 
 int *convolve_argmaxs_fixed_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded);
 
@@ -184,6 +192,8 @@ int *convolve_argmaxs_fixed_layer2(int N, int C, int H, int W, float *INPUTS, in
 int *convolve_and_pool_layer2(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH);
 
 void convolve_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH);
+
+void convolve_gradient_shadow_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH);
 
 void convolve_gradient_layer2(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH);
 

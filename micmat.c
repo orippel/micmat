@@ -1308,14 +1308,19 @@ void fill_nested(int N, int K, float *restrict A, float *restrict GEOMETRIC_SAMP
     }
 }
 
-void apply_dropout(int N, float *restrict A, int *restrict MASK){
+void apply_dropout(int N, int K, float *restrict A, int *restrict MASK){
     #pragma offload target(mic:MIC_DEV) \ 
     in(A:length(0) REUSE) \
     in(MASK:length(0) REUSE)
     { 
-        int n;
-        #pragma omp parallel for private(n)
-        for (n = 0; n < N; n++) A[n] = A[n] * ((float) MASK[n]);
+        int n, k;
+        #pragma omp parallel for private(n, k)
+        for (n = 0; n < N; n++){
+            for (k = 0; k < K; k++){
+                // A[n*K + k] *= ((float) MASK[k]);      
+                A[n*K + k] *= ((float) MASK[n*K + k]);      
+            }
+        } 
     }
 }
 
@@ -1710,6 +1715,265 @@ void crop(int N, int C, int H, int W, int output_W, int output_H, float *restric
     }
 }
 
+void response_normalization(int N, int K, int H, int W, float *restrict INPUTS, float *restrict OUTPUTS, float ALPHA, float BETA, int LOCAL_RADIUS){
+
+    #pragma offload target(mic:MIC_DEV) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(OUTPUTS:length(0) REUSE)
+    // in(GROUPS: length(0) REUSE)
+    {
+        int nk, n, k, h, w;
+        #pragma omp parallel for \
+            schedule(dynamic) \
+            default(none) \
+            private(nk, n, k, h, w) \
+            shared(N, K, H, W, INPUTS, OUTPUTS, ALPHA, BETA, LOCAL_RADIUS)
+            // shared(N, K, H, W, INPUTS, OUTPUTS, GROUPS, ALPHA, BETA, LOCAL_RADIUS)
+        for (nk = 0; nk < N*K; nk++){
+                n = nk/K;
+                k = md(nk, K);
+
+                for (h = 0; h < H; h++){
+                    for (w = 0; w < W; w++){
+                        float sum = 0.f;
+
+                        // if (LOCAL_RADIUS > 0){
+                        for (int l = mx(0, k - LOCAL_RADIUS); l < mn(K, k + LOCAL_RADIUS); l++){
+                            sum += pow(INPUTS[ti(n, l, h, w, K, H, W)], 2.f);
+                        }
+                        // }
+                        // else {
+                        //     for (int l = 0; l < K; l++){
+                        //         if (GROUPS[n*K + l] == 1) sum += pow(INPUTS[ti(n, l, h, w, K, H, W)], 2.f);
+                        //     }
+                        // }
+
+                        sum *= ALPHA/(2.f*((float) LOCAL_RADIUS) + 1.f);
+                        sum += 1.f;
+                        sum = pow(sum, -BETA);
+
+                        OUTPUTS[ti(n, k, h, w, K, H, W)] = INPUTS[ti(n, k, h, w, K, H, W)] * sum;
+                    }
+                }
+        }
+
+    }
+
+}
+
+void response_normalization_gradient(int N, int K, int H, int W, float *restrict INPUTS, float *restrict OUTPUTS, float *restrict D_INPUTS, float *restrict D_OUTPUTS, float ALPHA, float BETA, int LOCAL_RADIUS){
+
+    #pragma offload target(mic:MIC_DEV) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(OUTPUTS:length(0) REUSE) \
+    in(D_INPUTS:length(0) REUSE) \ 
+    in(D_OUTPUTS:length(0) REUSE)
+    // in(GROUPS: length(0) REUSE)
+    {
+        int nk, n, k, h, w;
+        #pragma omp parallel for \
+            schedule(dynamic) \
+            default(none) \
+            private(nk, n, k, h, w) \
+            shared(N, K, H, W, INPUTS, OUTPUTS, D_INPUTS, D_OUTPUTS, ALPHA, BETA, LOCAL_RADIUS)
+            // shared(N, K, H, W, INPUTS, OUTPUTS, GROUPS, ALPHA, BETA, LOCAL_RADIUS)
+        for (nk = 0; nk < N*K; nk++){
+                n = nk/K;
+                k = md(nk, K);
+
+                for (h = 0; h < H; h++){
+                    for (w = 0; w < W; w++){
+                        int nkhw = ti(n, k, h, w, K, H, W);
+
+                        float sum = 0.f;
+                        for (int l = mx(0, k - LOCAL_RADIUS); l < mn(K, k + LOCAL_RADIUS); l++){
+                            sum += pow(INPUTS[ti(n, l, h, w, K, H, W)], 2.f);
+                        }
+                        sum *= ALPHA/(2.f*((float) LOCAL_RADIUS) + 1.f);
+                        sum += 1.f;
+                        sum = pow(sum, -BETA);
+                        float value = D_OUTPUTS[ti(n, k, h, w, K, H, W)] * sum;
+
+
+                        for (int l = mx(0, k - LOCAL_RADIUS); l < mn(K, k + LOCAL_RADIUS); l++){
+                            int nlhw = ti(n, l, h, w, K, H, W);
+                            float inputs_nlhw = INPUTS[nlhw];
+
+                            if ((inputs_nlhw > 1.0e-5) || (inputs_nlhw < -1.0e-5))
+                                value -= 2.f*ALPHA*BETA/(2.f*((float) LOCAL_RADIUS) + 1.f) 
+                                        * pow(inputs_nlhw, 2.f)
+                                        * pow(OUTPUTS[nlhw]/inputs_nlhw, (BETA + 1.f)/BETA)
+                                        * D_OUTPUTS[nlhw];
+                            // value -= 2.f*ALPHA*BETA/(2.f*((float) LOCAL_RADIUS) + 1.f) 
+                            //         * pow(inputs_nlhw, 1.f - 1.f/BETA)       // * pow(inputs_nlhw, 2.f)
+                            //         * pow(OUTPUTS[nlhw], (BETA + 1.f)/BETA)       // * pow(OUTPUTS[nlhw]/inputs_nlhw, (BETA + 1.f)/BETA)
+                            //         * D_OUTPUTS[nlhw];
+
+                            // float sum = 0.f;
+                            // for (int i = mx(0, l - LOCAL_RADIUS); i < mn(K, l + LOCAL_RADIUS); i++){
+                            //     sum += pow(INPUTS[ti(n, i, h, w, K, H, W)], 2.f);
+                            // }
+                            
+                            // sum *= ALPHA/((float) N);
+                            // sum += 1.f;
+
+                            // // if (l == k) value += D_OUTPUTS[ti(n, l, h, w, K, H, W)] / pow(sum, BETA);
+
+                            // value -= 2.f*ALPHA*BETA/((float) N) * D_OUTPUTS[ti(n, l, h, w, K, H, W)] * pow(INPUTS[ti(n, l, h, w, K, H, W)], 2.f) / pow(sum, BETA + 1.f);
+                        }
+
+                        D_INPUTS[nkhw] = value;
+                    }
+                }
+        }
+
+    }
+
+}
+
+
+int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
+
+    assert(C == C_const);
+    assert(H == H_const);
+    assert(W == W_const);
+    assert(K == K_const);
+    assert(stride == stride_const);
+    assert(padding == padding_const);
+    assert(pooling_radius == pooling_radius_const);
+    assert(pooling_stride == pooling_stride_const);
+    assert(X == X_const);
+    assert(Y == Y_const);
+    assert(output_H_const == (H_const + 2*padding_const - Y_const + 1)/stride_const);
+    assert(output_W_const == (W_const + 2*padding_const - X_const + 1)/stride_const);
+    assert(pooled_H_const == (output_H_const - pooling_radius_const + 1)/pooling_stride_const);
+    assert(pooled_W_const == (output_W_const - pooling_radius_const + 1)/pooling_stride_const);
+
+    #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(FILTERS:length(0) REUSE) \ 
+    in(OUTPUTS:length(0) REUSE) \
+    in(ARGMAXS:length(0) REUSE) \
+    in(SCRATCH:length(0) REUSE)
+    {
+        int n_block, n, k, i, j, h, w, c, y, x;
+        int nk, ij;
+
+        // computation of constants
+        int XWN = (-X_const + W_const)*N,
+            HYWN = (H_const-Y_const)*W_const*N;        
+
+        #pragma omp parallel for \
+            schedule(dynamic) \
+            default(none) \
+            private(nk, ij, n_block, n, k, h, w, c, y, x, i, j) \
+            shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XWN, HYWN)
+        
+        // for each example, for each filter, for each pooling region...
+        for (nk = 0; nk < N/BLOCK*K_const; nk++){
+            
+            n_block = nk/K_const;
+            n = n_block*BLOCK;
+            k = md(nk, K_const);
+
+            float *restrict outputs_pointer = OUTPUTS + k*pooled_H_const*pooled_W_const*N + n;
+            for (ij = 0; ij < pooled_H_const*pooled_W_const; ij++) outputs_pointer[ij*N : BLOCK] = -1.0e10;
+
+            float *restrict convolutions = SCRATCH + 2*BLOCK*omp_get_thread_num();
+
+            int hw = 0,
+                kcyx_shift = k*C_const*Y_const*X_const - 1; // filters
+
+            for (h = 0; h < output_H_const; h+= stride_const){
+                for (w = 0; w < output_W_const; w+= stride_const){
+                    
+                    float *restrict filters_pointer = FILTERS + kcyx_shift;
+                    convolutions[0 : BLOCK] = 0.f;
+                   
+                    // if we're not on boundary (i.e not affected by padding)
+                    if (w - padding_const >= 0 &&
+                        h - padding_const >= 0 &&
+                        output_W_const - 1 - w >= padding_const  &&
+                        output_H_const - 1 - h >= padding_const){
+
+                        float *restrict inputs_pointer = INPUTS + ((h - padding_const)*W_const + (w - padding_const))*N + n;
+
+                        for (c = 0; c < C_const; ++c){  
+                            for (y = 0; y < Y_const; ++y){                                
+                                for (x = 0; x < X_const; ++x){
+                                    convolutions[0 : BLOCK] += inputs_pointer[0 : BLOCK] * (*(++filters_pointer));
+                                    inputs_pointer += N;
+                                } // x
+
+                                inputs_pointer += XWN;
+                            } // y
+                            inputs_pointer += HYWN;
+                        } // c
+                    }
+
+                    else{
+                        float *restrict inputs_pointer = INPUTS + (mx(mn(h-padding_const, H_const-1), 0)*W_const + mx(mn(w-padding_const, W_const-1), 0))*N + n;
+    
+                        for (c = 0; c < C_const; ++c){
+                            float *restrict inputs_pointer_c = inputs_pointer;
+                            
+                            for (y = 0; y < Y_const; ++y){
+                                
+                                float *restrict inputs_pointer_y = inputs_pointer; // start-of-line pointer
+                                
+                                if ((y + h - padding_const >= 0) && (y + h - padding_const < H_const)){ // i.e, are there any elements in this row that overlap with the image?
+                                    for (x = 0; x < X_const; ++x){
+                                        filters_pointer++;
+                                        
+                                        if ((x + w - padding_const >= 0) && (x + w - padding_const < W_const)){
+                                            convolutions[0 : BLOCK] += inputs_pointer[0 : BLOCK] * (*filters_pointer);
+                                            inputs_pointer += N;
+                                        }
+                                    } // x
+
+                                    inputs_pointer = inputs_pointer_y + W_const*N; 
+                                }
+
+                                else filters_pointer += X_const;
+                            } // y
+    
+                            inputs_pointer = inputs_pointer_c + H_const*W_const*N; 
+                        } // c
+                    }
+                    
+                    // loop over pooled outputs that care about this particular (pre-pooled) output element
+                    // update max, argmax
+                    int i_start = (h + pooling_stride_const - pooling_radius_const)/pooling_stride_const; // ceil((h - pooling_radius + 1)/pooling_stride)
+                    i_start = mx(i_start, 0);
+                    int j_start = (w + pooling_stride_const - pooling_radius_const)/pooling_stride_const;
+                    j_start = mx(j_start, 0);
+                    int i_end = h/pooling_stride_const; // floor(h/pooling_stride_const)
+                    i_end = (i_end >= pooled_H_const) ? (pooled_H_const - 1) : i_end;
+                    int j_end = w/pooling_stride_const;
+                    j_end = (j_end >= pooled_W_const) ? (pooled_W_const - 1) : j_end;
+
+                    outputs_pointer = OUTPUTS + ((k*pooled_H_const + i_start)*pooled_W_const + j_start)*N + n;
+                    int *restrict argmaxs_pointer = ARGMAXS + ((k*pooled_H_const + i_start)*pooled_W_const + j_start)*N + n;
+                    for (i = i_start; i <= i_end; ++i){
+                        for (j = j_start; j <= j_end; ++j){
+                            if (convolutions[0 : BLOCK] > outputs_pointer[0 : BLOCK]){
+                                outputs_pointer[0 : BLOCK] = convolutions[0 : BLOCK];
+                                argmaxs_pointer[0 : BLOCK] = hw;
+                            } // if
+                            outputs_pointer += N;
+                            argmaxs_pointer += N;
+                        } // j
+                        outputs_pointer += (-(j_end - j_start + 1) + pooled_W_const)*N;
+                        argmaxs_pointer += (-(j_end - j_start + 1) + pooled_W_const)*N;
+                    } // i
+
+                    hw++;
+                } // w
+            } // h
+        } // nk      
+    } // pragma_offload
+}
+
 // int *convolve_and_pool_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded){
 
 //     assert(C == C_const);
@@ -1821,219 +2085,6 @@ void crop(int N, int C, int H, int W, int output_W, int output_H, float *restric
 //     return ARGMAXS;
 // }
 
-// int *convolve_and_pool_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
-
-//     assert(C == C_const);
-//     assert(H == H_const);
-//     assert(W == W_const);
-//     assert(K == K_const);
-//     assert(stride == stride_const);
-//     assert(padding == padding_const);
-//     assert(pooling_radius == pooling_radius_const);
-//     assert(pooling_stride == pooling_stride_const);
-//     assert(X == X_const);
-//     assert(Y == Y_const);
-//     assert(output_H_const == (H_const + 2*padding_const - Y_const + 1)/stride_const);
-//     assert(output_W_const == (W_const + 2*padding_const - X_const + 1)/stride_const);
-//     assert(pooled_H_const == (output_H_const - pooling_radius_const + 1)/pooling_stride_const);
-//     assert(pooled_W_const == (output_W_const - pooling_radius_const + 1)/pooling_stride_const);
-
-//     #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \ 
-//     in(INPUTS:length(0) REUSE) \ 
-//     in(FILTERS:length(0) REUSE) \ 
-//     in(OUTPUTS:length(0) REUSE) \
-//     in(ARGMAXS:length(0) REUSE) \
-//     in(SCRATCH:length(0) REUSE)
-//     {
-//         float convolution = 0.f;
-//         int nkij, nkhw, n, k, i, j, h, w, c, y, x;
-//         int nk, ij;
-
-//         // computation of constants
-//         int XW = -X_const + W_const,
-//                     HYW = (H_const-Y_const)*W_const;
-
-//         // pre-compute indices over channels, width and height of elements to be summed in convolution
-//         int *restrict indices = malloc(C_const*Y_const*X_const*sizeof(int));
-//         int *restrict indices_pointer = indices - 1;
-//         int index = -1;
-//         for (c = 0; c < C_const; ++c){
-//             for (y = 0; y < Y_const; ++y){                                
-//                 for (x = 0; x < X_const; ++x){
-//                     *(++indices_pointer) = ++index;
-//                     } // x
-//                     index += XW;
-//             } // y
-//             index += HYW;
-//         } // c
-        
-        
-//         float *restrict ind_pointer = SCRATCH - 1;
-//         #pragma omp parallel for \
-//             schedule(dynamic, output_W_const) \
-//             private(h, w) \
-//             shared(SCRATCH, ind_pointer)
-//         for (h = 0; h < output_H_const; h++){
-//             for (w = 0; w < output_W_const; w++){
-//                 // pointer goes i_start, i_end, j_start, j_end
-//                 int i_start = (h + pooling_stride_const - pooling_radius_const)/pooling_stride_const; // ceil((h - pooling_radius + 1)/pooling_stride)
-//                 *(++ind_pointer) = (float) (i_start < 0) ? 0 : i_start;
-
-//                 int i_end = h/pooling_stride_const; // floor(h/pooling_stride_const)
-//                 *(++ind_pointer) = (float) (i_end >= pooled_H_const) ? (pooled_H_const - 1) : i_end;
-
-//                 int j_start = (w + pooling_stride_const - pooling_radius_const)/pooling_stride_const;
-//                 *(++ind_pointer) = (float) (j_start < 0) ? 0 : j_start;               
-                
-//                 int j_end = w/pooling_stride_const;
-//                 *(++ind_pointer) = (float) (j_end >= pooled_W_const) ? (pooled_W_const - 1) : j_end;
-//             }
-//         }
-
-//         #pragma omp parallel for \
-//             schedule(dynamic) \
-//             default(none) \
-//             private(nkhw, nkij, nk, ij, n, k, h, w, c, y, x, i, j, convolution) \
-//             shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XW, HYW, indices)
-        
-//         // for each example, for each filter, for each pooling region...
-//         for (nk = 0; nk < N*K_const; nk++){
-//             float *restrict outputs_pointer = OUTPUTS + nk*pooled_H_const*pooled_W_const - 1;
-//             for (ij = 0; ij < pooled_H_const*pooled_W_const; ij++) *(++outputs_pointer) = -1.0e10;
-
-//             n = nk / K_const;
-//             k = md(nk, K_const);
-            
-//             int hw = 0,
-//                 // nkhw = nk*output_H_const*output_W_const, // NOTE: not applicable for stride!
-//                 // kcyx_shift = k*C_const*Y_const*X_const - 1, // filters
-//                 // nchw_shift = (n*C_const*H_const)*W_const - 1; // inputs
-//                 kcyx_shift = k*C_const*Y_const*X_const, // filters
-//                 nchw_shift = (n*C_const*H_const)*W_const; // inputs
-
-//             // float *outputs_tmp = SCRATCH + 2*omp_get_thread_num()*pooled_H_const*pooled_W_const - 1;
-//             // for (h = 0; h < pooled_H_const; h++){
-//             //     for (w = 0; w < pooled_W_const; w++){
-//             //         *(++outputs_tmp) = -1.0e10;
-//             //     } // w
-//             // } // h
-//             // outputs_tmp = SCRATCH + 2*omp_get_thread_num()*pooled_H_const*pooled_W_const;
-//             // float *argmaxs_tmp = SCRATCH + (240 + 2*omp_get_thread_num())*pooled_H_const*pooled_W_const;
-//             float *restrict ind_pointer = SCRATCH - 1;
-
-//             for (h = 0; h < output_H_const; h+= stride_const){
-//                 for (w = 0; w < output_W_const; w+= stride_const){
-//                     convolution = 0.f;
-//                     float *restrict filters_pointer = FILTERS + kcyx_shift;
-                   
-//                     // if we're not on boundary (i.e not affected by padding)
-//                     if (w - padding_const >= 0 &&
-//                         h - padding_const >= 0 &&
-//                         output_W_const - 1 - w >= padding_const  &&
-//                         output_H_const - 1 - h >= padding_const){
-
-//                         float *restrict inputs_pointer = INPUTS + nchw_shift + (h - padding_const)*W_const + (w - padding_const);
-                        
-//                         convolution = __sec_reduce_add(inputs_pointer[indices[0:C_const*Y_const*X_const]] * filters_pointer[0:C_const*Y_const*X_const]);
-//                         filters_pointer += C_const*Y_const*X_const;
-
-//                         // The way I used to do this is with the below loop
-
-//                         // for (c = 0; c < C_const; ++c){
-//                         //     for (y = 0; y < Y_const; ++y){                                
-//                         //         for (x = 0; x < X_const; ++x){
-//                         //             convolution += (*(++inputs_pointer)) * (*(++filters_pointer));
-//                         //         } // x
-
-//                         //         inputs_pointer += XW;
-//                         //     } // y
-//                         //     inputs_pointer += HYW;
-//                         // } // c
-
-//                     }
-
-//                     else{
-//                         float *restrict inputs_pointer = INPUTS + nchw_shift + mx(mn(h-padding_const, H_const-1), 0)*W_const + mx(mn(w-padding_const, W_const-1), 0);
-    
-//                         for (c = 0; c < C_const; ++c){
-//                             float *restrict inputs_pointer_ncYX = inputs_pointer;
-                            
-//                             for (y = 0; y < Y_const; ++y){
-                                
-//                                 float *restrict inputs_pointer_ncyX = inputs_pointer; // start-of-line pointer
-                                
-//                                 if ((y + h - padding_const >= 0) && (y + h - padding_const < H_const)){
-//                                     for (x = 0; x < X_const; ++x){
-//                                         if ((x + w - padding_const >= 0) && (x + w - padding_const < W_const))
-//                                             convolution += (*(inputs_pointer++)) * (*filters_pointer);
-//                                         filters_pointer++;
-//                                     } // x
-//                                 }
-
-//                                 else{ // advance pointer without going into loop
-//                                     // inputs_pointer += X_const;
-//                                     filters_pointer += X_const;
-//                                 } 
-
-//                                 inputs_pointer = inputs_pointer_ncyX + W_const; 
-//                             } // y
-    
-//                             inputs_pointer = inputs_pointer_ncYX + H_const*W_const; 
-//                         } // c
-//                     }
-                    
-//                     // loop over pooled outputs that care about this particular (pre-pooled) output element
-//                     // update max, argmax
-//                     int i_start = (int) *(++ind_pointer);
-//                     int i_end = (int) *(++ind_pointer);
-//                     int j_start = (int) *(++ind_pointer);
-//                     int j_end = (int) *(++ind_pointer);
-//                     // int i_start = (h + pooling_stride_const - pooling_radius_const)/pooling_stride_const; // ceil((h - pooling_radius + 1)/pooling_stride)
-//                     // i_start = (i_start < 0) ? 0 : i_start;
-//                     // int j_start = (w + pooling_stride_const - pooling_radius_const)/pooling_stride_const;
-//                     // j_start = (j_start < 0) ? 0 : j_start;
-//                     // int i_end = h/pooling_stride_const; // floor(h/pooling_stride_const)
-//                     // i_end = (i_end >= pooled_H_const) ? (pooled_H_const - 1) : i_end;
-//                     // int j_end = w/pooling_stride_const;
-//                     // j_end = (j_end >= pooled_W_const) ? (pooled_W_const - 1) : j_end;
-
-//                     outputs_pointer = OUTPUTS + (nk*pooled_H_const + i_start)*pooled_W_const + j_start;
-//                     int *restrict argmaxs_pointer = ARGMAXS + (nk*pooled_H_const + i_start)*pooled_W_const + j_start - 1;
-//                     // float *restrict outputs_pointer = outputs_tmp + i_start*pooled_W_const + j_start;
-//                     // float *restrict argmaxs_pointer = argmaxs_tmp + i_start*pooled_W_const + j_start - 1;
-//                     for (i = i_start; i <= i_end; ++i){
-//                         for (j = j_start; j <= j_end; ++j){
-//                             // nkij = (nk*pooled_H_const + i)*pooled_W_const + j;
-//                             if (convolution > *outputs_pointer){
-//                                 *(outputs_pointer++) = convolution;
-//                                 *(++argmaxs_pointer) = hw;
-//                                 // *(++argmaxs_pointer) = (float) hw;
-//                             }
-//                         } // j
-//                         outputs_pointer += -(j_end - j_start) + pooled_W_const;
-//                         argmaxs_pointer += -(j_end - j_start) + pooled_W_const;
-//                     } // i
-
-//                     hw++;
-//                 } // w
-//             } // h
-
-//             // float *restrict outputs_pointer = OUTPUTS + nk*pooled_H_const*pooled_W_const - 1;
-//             // int *restrict argmaxs_pointer = ARGMAXS + nk*pooled_H_const*pooled_W_const - 1;
-//             // for (h = 0; h < pooled_H_const; h++){
-//             //     for (w = 0; w < pooled_W_const; w++){
-//             //         *(++outputs_pointer) = *(++outputs_tmp);
-//             //         *(++argmaxs_pointer) = (int) *(++argmaxs_tmp);
-//             //     } // w
-//             // } // h
-
-//         } // nk
-         
-//     } // pragma_offload
-
-//     return ARGMAXS;
-// }
-
 int *convolve_and_pool_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
 
     assert(C == C_const);
@@ -2066,13 +2117,50 @@ int *convolve_and_pool_layer1(int N, int C, int H, int W, float *restrict INPUTS
         int XW = -X_const + W_const,
                     HYW = (H_const-Y_const)*W_const;
 
+        // pre-compute indices over channels, width and height of elements to be summed in convolution
+        int *restrict indices = malloc(C_const*Y_const*X_const*sizeof(int));
+        int *restrict indices_pointer = indices - 1;
+        int index = -1;
+        for (c = 0; c < C_const; ++c){
+            for (y = 0; y < Y_const; ++y){                                
+                for (x = 0; x < X_const; ++x){
+                    *(++indices_pointer) = ++index;
+                    } // x
+                    index += XW;
+            } // y
+            index += HYW;
+        } // c
+        
+        
+        float *restrict ind_pointer = SCRATCH - 1;
+        #pragma omp parallel for \
+            schedule(dynamic, output_W_const) \
+            private(h, w) \
+            shared(SCRATCH, ind_pointer)
+        for (h = 0; h < output_H_const; h++){
+            for (w = 0; w < output_W_const; w++){
+                // pointer goes i_start, i_end, j_start, j_end
+                int i_start = (h + pooling_stride_const - pooling_radius_const)/pooling_stride_const; // ceil((h - pooling_radius + 1)/pooling_stride)
+                *(++ind_pointer) = (float) (i_start < 0) ? 0 : i_start;
+
+                int i_end = h/pooling_stride_const; // floor(h/pooling_stride_const)
+                *(++ind_pointer) = (float) (i_end >= pooled_H_const) ? (pooled_H_const - 1) : i_end;
+
+                int j_start = (w + pooling_stride_const - pooling_radius_const)/pooling_stride_const;
+                *(++ind_pointer) = (float) (j_start < 0) ? 0 : j_start;               
+                
+                int j_end = w/pooling_stride_const;
+                *(++ind_pointer) = (float) (j_end >= pooled_W_const) ? (pooled_W_const - 1) : j_end;
+            }
+        }
+
         #pragma omp parallel for \
             schedule(dynamic) \
             default(none) \
             private(nkhw, nkij, nk, ij, n, k, h, w, c, y, x, i, j, convolution) \
-            shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XW, HYW)
+            shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XW, HYW, indices)
         
-        // for each example, for each filter
+        // for each example, for each filter, for each pooling region...
         for (nk = 0; nk < N*K_const; nk++){
             float *restrict outputs_pointer = OUTPUTS + nk*pooled_H_const*pooled_W_const - 1;
             for (ij = 0; ij < pooled_H_const*pooled_W_const; ij++) *(++outputs_pointer) = -1.0e10;
@@ -2081,14 +2169,24 @@ int *convolve_and_pool_layer1(int N, int C, int H, int W, float *restrict INPUTS
             k = md(nk, K_const);
             
             int hw = 0,
-                kcyx_shift = k*C_const*Y_const*X_const - 1, // filters
-                nchw_shift = (n*C_const*H_const)*W_const - 1; // inputs
+                // nkhw = nk*output_H_const*output_W_const, // NOTE: not applicable for stride!
+                // kcyx_shift = k*C_const*Y_const*X_const - 1, // filters
+                // nchw_shift = (n*C_const*H_const)*W_const - 1; // inputs
+                kcyx_shift = k*C_const*Y_const*X_const, // filters
+                nchw_shift = (n*C_const*H_const)*W_const; // inputs
 
-            // scanning over a particular image, for a particular filter
+            // float *outputs_tmp = SCRATCH + 2*omp_get_thread_num()*pooled_H_const*pooled_W_const - 1;
+            // for (h = 0; h < pooled_H_const; h++){
+            //     for (w = 0; w < pooled_W_const; w++){
+            //         *(++outputs_tmp) = -1.0e10;
+            //     } // w
+            // } // h
+            // outputs_tmp = SCRATCH + 2*omp_get_thread_num()*pooled_H_const*pooled_W_const;
+            // float *argmaxs_tmp = SCRATCH + (240 + 2*omp_get_thread_num())*pooled_H_const*pooled_W_const;
+            float *restrict ind_pointer = SCRATCH - 1;
+
             for (h = 0; h < output_H_const; h+= stride_const){
                 for (w = 0; w < output_W_const; w+= stride_const){
-
-                    // ------------------ CONVOLUTION ------------------ 
                     convolution = 0.f;
                     float *restrict filters_pointer = FILTERS + kcyx_shift;
                    
@@ -2099,34 +2197,47 @@ int *convolve_and_pool_layer1(int N, int C, int H, int W, float *restrict INPUTS
                         output_H_const - 1 - h >= padding_const){
 
                         float *restrict inputs_pointer = INPUTS + nchw_shift + (h - padding_const)*W_const + (w - padding_const);
+                        
+                        convolution = __sec_reduce_add(inputs_pointer[indices[0:C_const*Y_const*X_const]] * filters_pointer[0:C_const*Y_const*X_const]);
+                        filters_pointer += C_const*Y_const*X_const;
 
-                        for (c = 0; c < C_const; ++c){
-                            for (y = 0; y < Y_const; ++y){                                
-                                for (x = 0; x < X_const; ++x){
-                                    convolution += (*(++inputs_pointer)) * (*(++filters_pointer));
-                                } // x
-                                inputs_pointer += XW;
-                            } // y
-                            inputs_pointer += HYW;
-                        } // c
+                        // The way I used to do this is with the below loop
+
+                        // for (c = 0; c < C_const; ++c){
+                        //     for (y = 0; y < Y_const; ++y){                                
+                        //         for (x = 0; x < X_const; ++x){
+                        //             convolution += (*(++inputs_pointer)) * (*(++filters_pointer));
+                        //         } // x
+
+                        //         inputs_pointer += XW;
+                        //     } // y
+                        //     inputs_pointer += HYW;
+                        // } // c
+
                     }
-                    else { // if we're computing convolution in padding region
+
+                    else{
                         float *restrict inputs_pointer = INPUTS + nchw_shift + mx(mn(h-padding_const, H_const-1), 0)*W_const + mx(mn(w-padding_const, W_const-1), 0);
     
                         for (c = 0; c < C_const; ++c){
                             float *restrict inputs_pointer_ncYX = inputs_pointer;
                             
                             for (y = 0; y < Y_const; ++y){
+                                
                                 float *restrict inputs_pointer_ncyX = inputs_pointer; // start-of-line pointer
                                 
                                 if ((y + h - padding_const >= 0) && (y + h - padding_const < H_const)){
                                     for (x = 0; x < X_const; ++x){
                                         if ((x + w - padding_const >= 0) && (x + w - padding_const < W_const))
-                                            filters_pointer++;
                                             convolution += (*(inputs_pointer++)) * (*filters_pointer);
+                                        filters_pointer++;
                                     } // x
                                 }
-                                else filters_pointer += X_const; // advance pointer without going into loop
+
+                                else{ // advance pointer without going into loop
+                                    // inputs_pointer += X_const;
+                                    filters_pointer += X_const;
+                                } 
 
                                 inputs_pointer = inputs_pointer_ncyX + W_const; 
                             } // y
@@ -2135,25 +2246,33 @@ int *convolve_and_pool_layer1(int N, int C, int H, int W, float *restrict INPUTS
                         } // c
                     }
                     
-                    // ------------------ POOLING ------------------ 
-                    // compute boundaries of pooling windows that are affected by the particular convolution element considered
-                    int i_start = (h + pooling_stride_const - pooling_radius_const)/pooling_stride_const; // this is computing ceil((h - pooling_radius + 1)/pooling_stride)
-                    i_start = (i_start < 0) ? 0 : i_start;
-                    int j_start = (w + pooling_stride_const - pooling_radius_const)/pooling_stride_const;
-                    j_start = (j_start < 0) ? 0 : j_start;
-                    int i_end = h/pooling_stride_const; // this is computing floor(h/pooling_stride_const)
-                    i_end = (i_end >= pooled_H_const) ? (pooled_H_const - 1) : i_end;
-                    int j_end = w/pooling_stride_const;
-                    j_end = (j_end >= pooled_W_const) ? (pooled_W_const - 1) : j_end;
+                    // loop over pooled outputs that care about this particular (pre-pooled) output element
+                    // update max, argmax
+                    int i_start = (int) *(++ind_pointer);
+                    int i_end = (int) *(++ind_pointer);
+                    int j_start = (int) *(++ind_pointer);
+                    int j_end = (int) *(++ind_pointer);
+                    // int i_start = (h + pooling_stride_const - pooling_radius_const)/pooling_stride_const; // ceil((h - pooling_radius + 1)/pooling_stride)
+                    // i_start = (i_start < 0) ? 0 : i_start;
+                    // int j_start = (w + pooling_stride_const - pooling_radius_const)/pooling_stride_const;
+                    // j_start = (j_start < 0) ? 0 : j_start;
+                    // int i_end = h/pooling_stride_const; // floor(h/pooling_stride_const)
+                    // i_end = (i_end >= pooled_H_const) ? (pooled_H_const - 1) : i_end;
+                    // int j_end = w/pooling_stride_const;
+                    // j_end = (j_end >= pooled_W_const) ? (pooled_W_const - 1) : j_end;
 
                     outputs_pointer = OUTPUTS + (nk*pooled_H_const + i_start)*pooled_W_const + j_start;
                     int *restrict argmaxs_pointer = ARGMAXS + (nk*pooled_H_const + i_start)*pooled_W_const + j_start - 1;
+                    // float *restrict outputs_pointer = outputs_tmp + i_start*pooled_W_const + j_start;
+                    // float *restrict argmaxs_pointer = argmaxs_tmp + i_start*pooled_W_const + j_start - 1;
                     for (i = i_start; i <= i_end; ++i){
                         for (j = j_start; j <= j_end; ++j){
+                            // nkij = (nk*pooled_H_const + i)*pooled_W_const + j;
                             if (convolution > *outputs_pointer){
                                 *(outputs_pointer++) = convolution;
                                 *(++argmaxs_pointer) = hw;
-                            } //i
+                                // *(++argmaxs_pointer) = (float) hw;
+                            }
                         } // j
                         outputs_pointer += -(j_end - j_start) + pooled_W_const;
                         argmaxs_pointer += -(j_end - j_start) + pooled_W_const;
@@ -2163,12 +2282,378 @@ int *convolve_and_pool_layer1(int N, int C, int H, int W, float *restrict INPUTS
                 } // w
             } // h
 
+            // float *restrict outputs_pointer = OUTPUTS + nk*pooled_H_const*pooled_W_const - 1;
+            // int *restrict argmaxs_pointer = ARGMAXS + nk*pooled_H_const*pooled_W_const - 1;
+            // for (h = 0; h < pooled_H_const; h++){
+            //     for (w = 0; w < pooled_W_const; w++){
+            //         *(++outputs_pointer) = *(++outputs_tmp);
+            //         *(++argmaxs_pointer) = (int) *(++argmaxs_tmp);
+            //     } // w
+            // } // h
+
         } // nk
          
     } // pragma_offload
 
     return ARGMAXS;
 }
+
+int *convolve_and_pool_shadow_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
+
+    assert(C == C_const);
+    assert(H == H_const);
+    assert(W == W_const);
+    assert(K == K_const);
+    assert(stride == stride_const);
+    assert(padding == padding_const);
+    assert(pooling_radius == pooling_radius_const);
+    assert(pooling_stride == pooling_stride_const);
+    assert(X == X_const);
+    assert(Y == Y_const);
+    assert(output_H_const == (H_const + 2*padding_const - Y_const + 1)/stride_const);
+    assert(output_W_const == (W_const + 2*padding_const - X_const + 1)/stride_const);
+    assert(pooled_H_const == (output_H_const - pooling_radius_const + 1)/pooling_stride_const);
+    assert(pooled_W_const == (output_W_const - pooling_radius_const + 1)/pooling_stride_const);
+
+    #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(FILTERS:length(0) REUSE) \ 
+    in(OUTPUTS:length(0) REUSE) \
+    in(ARGMAXS:length(0) REUSE) \
+    in(SCRATCH:length(0) REUSE)
+    {
+        float convolution = 0.f;
+        int nkij, nkhw, n, k, i, j, h, w, c, y, x;
+        int nk, ij;
+
+        // computation of constants
+        int XW = -X_const + W_const,
+                    HYW = (H_const-Y_const)*W_const;
+
+        // pre-compute indices over channels, width and height of elements to be summed in convolution
+        int *restrict indices = malloc(C_const*Y_const*X_const*sizeof(int));
+        int *restrict indices_pointer = indices - 1;
+        int index = -1;
+        for (c = 0; c < C_const; ++c){
+            for (y = 0; y < Y_const; ++y){                                
+                for (x = 0; x < X_const; ++x){
+                    *(++indices_pointer) = ++index;
+                    } // x
+                    index += XW;
+            } // y
+            index += HYW;
+        } // c
+        
+        
+        float *restrict ind_pointer = SCRATCH - 1;
+        #pragma omp parallel for \
+            schedule(dynamic, output_W_const) \
+            private(h, w) \
+            shared(SCRATCH, ind_pointer)
+        for (h = 0; h < output_H_const; h++){
+            for (w = 0; w < output_W_const; w++){
+                // pointer goes i_start, i_end, j_start, j_end
+                int i_start = (h + pooling_stride_const - pooling_radius_const)/pooling_stride_const; // ceil((h - pooling_radius + 1)/pooling_stride)
+                *(++ind_pointer) = (float) (i_start < 0) ? 0 : i_start;
+
+                int i_end = h/pooling_stride_const; // floor(h/pooling_stride_const)
+                *(++ind_pointer) = (float) (i_end >= pooled_H_const) ? (pooled_H_const - 1) : i_end;
+
+                int j_start = (w + pooling_stride_const - pooling_radius_const)/pooling_stride_const;
+                *(++ind_pointer) = (float) (j_start < 0) ? 0 : j_start;               
+                
+                int j_end = w/pooling_stride_const;
+                *(++ind_pointer) = (float) (j_end >= pooled_W_const) ? (pooled_W_const - 1) : j_end;
+            }
+        }
+
+        #pragma omp parallel for \
+            schedule(dynamic) \
+            default(none) \
+            private(nkhw, nkij, nk, ij, n, k, h, w, c, y, x, i, j, convolution) \
+            shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XW, HYW, indices)
+        
+        // for each example, for each filter, for each pooling region...
+        for (nk = 0; nk < N*K_const; nk++){
+            float *restrict outputs_pointer = OUTPUTS + nk*pooled_H_const*pooled_W_const - 1;
+            for (ij = 0; ij < pooled_H_const*pooled_W_const; ij++) *(++outputs_pointer) = -1.0e10;
+
+            outputs_pointer = OUTPUTS + N*K_const*pooled_H_const*pooled_W_const + nk*pooled_H_const*pooled_W_const - 1;
+            for (ij = 0; ij < pooled_H_const*pooled_W_const; ij++) *(++outputs_pointer) = -1.0e10;
+
+            n = nk / K_const;
+            k = md(nk, K_const);
+            
+            int hw = 0,
+                // nkhw = nk*output_H_const*output_W_const, // NOTE: not applicable for stride!
+                // kcyx_shift = k*C_const*Y_const*X_const - 1, // filters
+                // nchw_shift = (n*C_const*H_const)*W_const - 1; // inputs
+                kcyx_shift = k*C_const*Y_const*X_const, // filters
+                nchw_shift = (n*C_const*H_const)*W_const; // inputs
+
+            // float *outputs_tmp = SCRATCH + 2*omp_get_thread_num()*pooled_H_const*pooled_W_const - 1;
+            // for (h = 0; h < pooled_H_const; h++){
+            //     for (w = 0; w < pooled_W_const; w++){
+            //         *(++outputs_tmp) = -1.0e10;
+            //     } // w
+            // } // h
+            // outputs_tmp = SCRATCH + 2*omp_get_thread_num()*pooled_H_const*pooled_W_const;
+            // float *argmaxs_tmp = SCRATCH + (240 + 2*omp_get_thread_num())*pooled_H_const*pooled_W_const;
+            float *restrict ind_pointer = SCRATCH - 1;
+
+            for (h = 0; h < output_H_const; h+= stride_const){
+                for (w = 0; w < output_W_const; w+= stride_const){
+                    convolution = 0.f;
+                    float *restrict filters_pointer = FILTERS + kcyx_shift;
+                   
+                    // if we're not on boundary (i.e not affected by padding)
+                    if (w - padding_const >= 0 &&
+                        h - padding_const >= 0 &&
+                        output_W_const - 1 - w >= padding_const  &&
+                        output_H_const - 1 - h >= padding_const){
+
+                        float *restrict inputs_pointer = INPUTS + nchw_shift + (h - padding_const)*W_const + (w - padding_const);
+                        
+                        convolution = __sec_reduce_add(inputs_pointer[indices[0:C_const*Y_const*X_const]] * filters_pointer[0:C_const*Y_const*X_const]);
+                        filters_pointer += C_const*Y_const*X_const;
+
+                    }
+
+                    else{
+                        float *restrict inputs_pointer = INPUTS + nchw_shift + mx(mn(h-padding_const, H_const-1), 0)*W_const + mx(mn(w-padding_const, W_const-1), 0);
+    
+                        for (c = 0; c < C_const; ++c){
+                            float *restrict inputs_pointer_ncYX = inputs_pointer;
+                            
+                            for (y = 0; y < Y_const; ++y){
+                                
+                                float *restrict inputs_pointer_ncyX = inputs_pointer; // start-of-line pointer
+                                
+                                if ((y + h - padding_const >= 0) && (y + h - padding_const < H_const)){
+                                    for (x = 0; x < X_const; ++x){
+                                        if ((x + w - padding_const >= 0) && (x + w - padding_const < W_const))
+                                            convolution += (*(inputs_pointer++)) * (*filters_pointer);
+                                        filters_pointer++;
+                                    } // x
+                                }
+
+                                else{ // advance pointer without going into loop
+                                    // inputs_pointer += X_const;
+                                    filters_pointer += X_const;
+                                } 
+
+                                inputs_pointer = inputs_pointer_ncyX + W_const; 
+                            } // y
+    
+                            inputs_pointer = inputs_pointer_ncYX + H_const*W_const; 
+                        } // c
+                    }
+                    
+                    // loop over pooled outputs that care about this particular (pre-pooled) output element
+                    // update max, argmax
+                    int i_start = (int) *(++ind_pointer);
+                    int i_end = (int) *(++ind_pointer);
+                    int j_start = (int) *(++ind_pointer);
+                    int j_end = (int) *(++ind_pointer);
+                    // int i_start = (h + pooling_stride_const - pooling_radius_const)/pooling_stride_const; // ceil((h - pooling_radius + 1)/pooling_stride)
+                    // i_start = (i_start < 0) ? 0 : i_start;
+                    // int j_start = (w + pooling_stride_const - pooling_radius_const)/pooling_stride_const;
+                    // j_start = (j_start < 0) ? 0 : j_start;
+                    // int i_end = h/pooling_stride_const; // floor(h/pooling_stride_const)
+                    // i_end = (i_end >= pooled_H_const) ? (pooled_H_const - 1) : i_end;
+                    // int j_end = w/pooling_stride_const;
+                    // j_end = (j_end >= pooled_W_const) ? (pooled_W_const - 1) : j_end;
+
+                    outputs_pointer = OUTPUTS + (nk*pooled_H_const + i_start)*pooled_W_const + j_start;
+                    int *restrict argmaxs_pointer = ARGMAXS + (nk*pooled_H_const + i_start)*pooled_W_const + j_start - 1;
+                    // float *restrict outputs_pointer = outputs_tmp + i_start*pooled_W_const + j_start;
+                    // float *restrict argmaxs_pointer = argmaxs_tmp + i_start*pooled_W_const + j_start - 1;
+                    for (i = i_start; i <= i_end; ++i){
+                        for (j = j_start; j <= j_end; ++j){
+                            // nkij = (nk*pooled_H_const + i)*pooled_W_const + j;
+                            if (convolution > *outputs_pointer){
+                                *(outputs_pointer++) = convolution;
+                                *(++argmaxs_pointer) = hw;
+                                // *(++argmaxs_pointer) = (float) hw;
+                            }
+                        } // j
+                        outputs_pointer += -(j_end - j_start) + pooled_W_const;
+                        argmaxs_pointer += -(j_end - j_start) + pooled_W_const;
+                    } // i
+
+                    // shadow filters
+                    convolution = -convolution;
+                    outputs_pointer = OUTPUTS + N*K_const*pooled_H_const*pooled_W_const + (nk*pooled_H_const + i_start)*pooled_W_const + j_start;
+                    argmaxs_pointer = ARGMAXS + N*K_const*pooled_H_const*pooled_W_const + (nk*pooled_H_const + i_start)*pooled_W_const + j_start - 1;
+                    // float *restrict outputs_pointer = outputs_tmp + i_start*pooled_W_const + j_start;
+                    // float *restrict argmaxs_pointer = argmaxs_tmp + i_start*pooled_W_const + j_start - 1;
+                    for (i = i_start; i <= i_end; ++i){
+                        for (j = j_start; j <= j_end; ++j){
+                            // nkij = (nk*pooled_H_const + i)*pooled_W_const + j;
+                            if (convolution > *outputs_pointer){
+                                *(outputs_pointer++) = convolution;
+                                *(++argmaxs_pointer) = hw;
+                                // *(++argmaxs_pointer) = (float) hw;
+                            }
+                        } // j
+                        outputs_pointer += -(j_end - j_start) + pooled_W_const;
+                        argmaxs_pointer += -(j_end - j_start) + pooled_W_const;
+                    } // i
+
+                    hw++;
+                } // w
+            } // h
+
+            // float *restrict outputs_pointer = OUTPUTS + nk*pooled_H_const*pooled_W_const - 1;
+            // int *restrict argmaxs_pointer = ARGMAXS + nk*pooled_H_const*pooled_W_const - 1;
+            // for (h = 0; h < pooled_H_const; h++){
+            //     for (w = 0; w < pooled_W_const; w++){
+            //         *(++outputs_pointer) = *(++outputs_tmp);
+            //         *(++argmaxs_pointer) = (int) *(++argmaxs_tmp);
+            //     } // w
+            // } // h
+
+        } // nk
+    } // pragma_offload
+
+    return ARGMAXS;
+}
+
+// int *convolve_and_pool_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
+
+//     assert(C == C_const);
+//     assert(H == H_const);
+//     assert(W == W_const);
+//     assert(K == K_const);
+//     assert(stride == stride_const);
+//     assert(padding == padding_const);
+//     assert(pooling_radius == pooling_radius_const);
+//     assert(pooling_stride == pooling_stride_const);
+//     assert(X == X_const);
+//     assert(Y == Y_const);
+//     assert(output_H_const == (H_const + 2*padding_const - Y_const + 1)/stride_const);
+//     assert(output_W_const == (W_const + 2*padding_const - X_const + 1)/stride_const);
+//     assert(pooled_H_const == (output_H_const - pooling_radius_const + 1)/pooling_stride_const);
+//     assert(pooled_W_const == (output_W_const - pooling_radius_const + 1)/pooling_stride_const);
+
+//     #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \ 
+//     in(INPUTS:length(0) REUSE) \ 
+//     in(FILTERS:length(0) REUSE) \ 
+//     in(OUTPUTS:length(0) REUSE) \
+//     in(ARGMAXS:length(0) REUSE) \
+//     in(SCRATCH:length(0) REUSE)
+//     {
+//         float convolution = 0.f;
+//         int nkij, nkhw, n, k, i, j, h, w, c, y, x;
+//         int nk, ij;
+
+//         // computation of constants
+//         int XW = -X_const + W_const,
+//                     HYW = (H_const-Y_const)*W_const;
+
+//         #pragma omp parallel for \
+//             schedule(dynamic) \
+//             default(none) \
+//             private(nkhw, nkij, nk, ij, n, k, h, w, c, y, x, i, j, convolution) \
+//             shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XW, HYW)
+        
+//         // for each example, for each filter
+//         for (nk = 0; nk < N*K_const; nk++){
+//             float *restrict outputs_pointer = OUTPUTS + nk*pooled_H_const*pooled_W_const - 1;
+//             for (ij = 0; ij < pooled_H_const*pooled_W_const; ij++) *(++outputs_pointer) = -1.0e10;
+
+//             n = nk / K_const;
+//             k = md(nk, K_const);
+            
+//             int hw = 0,
+//                 kcyx_shift = k*C_const*Y_const*X_const - 1, // filters
+//                 nchw_shift = (n*C_const*H_const)*W_const - 1; // inputs
+
+//             // scanning over a particular image, for a particular filter
+//             for (h = 0; h < output_H_const; h+= stride_const){
+//                 for (w = 0; w < output_W_const; w+= stride_const){
+
+//                     // ------------------ CONVOLUTION ------------------ 
+//                     convolution = 0.f;
+//                     float *restrict filters_pointer = FILTERS + kcyx_shift;
+                   
+//                     // if we're not on boundary (i.e not affected by padding)
+//                     if (w - padding_const >= 0 &&
+//                         h - padding_const >= 0 &&
+//                         output_W_const - 1 - w >= padding_const  &&
+//                         output_H_const - 1 - h >= padding_const){
+
+//                         float *restrict inputs_pointer = INPUTS + nchw_shift + (h - padding_const)*W_const + (w - padding_const);
+
+//                         for (c = 0; c < C_const; ++c){
+//                             for (y = 0; y < Y_const; ++y){                                
+//                                 for (x = 0; x < X_const; ++x){
+//                                     convolution += (*(++inputs_pointer)) * (*(++filters_pointer));
+//                                 } // x
+//                                 inputs_pointer += XW;
+//                             } // y
+//                             inputs_pointer += HYW;
+//                         } // c
+//                     }
+//                     else { // if we're computing convolution in padding region
+//                         float *restrict inputs_pointer = INPUTS + nchw_shift + mx(mn(h-padding_const, H_const-1), 0)*W_const + mx(mn(w-padding_const, W_const-1), 0);
+    
+//                         for (c = 0; c < C_const; ++c){
+//                             float *restrict inputs_pointer_ncYX = inputs_pointer;
+                            
+//                             for (y = 0; y < Y_const; ++y){
+//                                 float *restrict inputs_pointer_ncyX = inputs_pointer; // start-of-line pointer
+                                
+//                                 if ((y + h - padding_const >= 0) && (y + h - padding_const < H_const)){
+//                                     for (x = 0; x < X_const; ++x){
+//                                         if ((x + w - padding_const >= 0) && (x + w - padding_const < W_const))
+//                                             filters_pointer++;
+//                                             convolution += (*(inputs_pointer++)) * (*filters_pointer);
+//                                     } // x
+//                                 }
+//                                 else filters_pointer += X_const; // advance pointer without going into loop
+
+//                                 inputs_pointer = inputs_pointer_ncyX + W_const; 
+//                             } // y
+    
+//                             inputs_pointer = inputs_pointer_ncYX + H_const*W_const; 
+//                         } // c
+//                     }
+                    
+//                     // ------------------ POOLING ------------------ 
+//                     // compute boundaries of pooling windows that are affected by the particular convolution element considered
+//                     int i_start = (h + pooling_stride_const - pooling_radius_const)/pooling_stride_const; // this is computing ceil((h - pooling_radius + 1)/pooling_stride)
+//                     i_start = (i_start < 0) ? 0 : i_start;
+//                     int j_start = (w + pooling_stride_const - pooling_radius_const)/pooling_stride_const;
+//                     j_start = (j_start < 0) ? 0 : j_start;
+//                     int i_end = h/pooling_stride_const; // this is computing floor(h/pooling_stride_const)
+//                     i_end = (i_end >= pooled_H_const) ? (pooled_H_const - 1) : i_end;
+//                     int j_end = w/pooling_stride_const;
+//                     j_end = (j_end >= pooled_W_const) ? (pooled_W_const - 1) : j_end;
+
+//                     outputs_pointer = OUTPUTS + (nk*pooled_H_const + i_start)*pooled_W_const + j_start;
+//                     int *restrict argmaxs_pointer = ARGMAXS + (nk*pooled_H_const + i_start)*pooled_W_const + j_start - 1;
+//                     for (i = i_start; i <= i_end; ++i){
+//                         for (j = j_start; j <= j_end; ++j){
+//                             if (convolution > *outputs_pointer){
+//                                 *(outputs_pointer++) = convolution;
+//                                 *(++argmaxs_pointer) = hw;
+//                             } //i
+//                         } // j
+//                         outputs_pointer += -(j_end - j_start) + pooled_W_const;
+//                         argmaxs_pointer += -(j_end - j_start) + pooled_W_const;
+//                     } // i
+
+//                     hw++;
+//                 } // w
+//             } // h
+
+//         } // nk
+         
+//     } // pragma_offload
+
+//     return ARGMAXS;
+// }
 
 void convolve_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_POOLED_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH){
 
@@ -2294,6 +2779,132 @@ void convolve_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int K, 
   
   }
 }
+
+void convolve_gradient_shadow_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_POOLED_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH){
+
+  #pragma offload target(mic:MIC_DEV) \ 
+  in(INPUTS:length(0) REUSE) \ 
+  in(FILTERS:length(0) REUSE) \ 
+  in(ARGMAXS:length(0) REUSE) \
+  in(D_POOLED_OUTPUTS:length(0) REUSE) \
+  in(D_FILTERS:length(0) REUSE) \
+  in(SCRATCH:length(0) REUSE)
+  {
+        int nkc, ncHW, h, w, k, c, lin_index, y, x, h_arg, w_arg, n, tmp;
+        int XW = -X_const + W_const,
+                    HYW = (H_const-Y_const)*W_const;
+
+        #pragma omp parallel for \
+        default(none) \
+        schedule(dynamic, C_const) \
+        private(nkc, ncHW, h, w, k, c, lin_index, y, x, h_arg, w_arg, n, tmp) \
+        shared(N, INPUTS, ARGMAXS, FILTERS, D_POOLED_OUTPUTS, D_FILTERS, SCRATCH, XW, HYW)
+
+        for (nkc = 0; nkc < N*K_const*C_const; nkc++){
+            n = nkc/(K_const*C_const);
+            k = md(nkc, K_const*C_const)/C_const;
+            c = md(nkc, C_const);
+
+            // k = nkc/(N*C_const);
+            // n = md(nkc, N*C_const)/C_const;
+            // c = md(nkc, C_const);
+
+            // n = nkc/(K_const*C_const);
+            // c = md(nkc, K_const*C_const)/K_const;
+            // k = md(nkc, K_const);
+
+            // k = nkc/(N*C_const);
+            // c = md(nkc, N*C_const)/N;
+            // n = md(nkc, N);
+
+            ncHW = (n*C_const + c)*H_const*W_const;
+
+            float *restrict d_pooled_outputs_pointer = D_POOLED_OUTPUTS + N*K_const*pooled_H_const*pooled_W_const + (n*K_const + k)*pooled_H_const*pooled_W_const;
+            int *restrict argmaxs_pointer = ARGMAXS + N*K_const*pooled_H_const*pooled_W_const + (n*K_const + k)*pooled_H_const*pooled_W_const - 1;
+
+            float *d_filters_tmp = SCRATCH + 2*omp_get_thread_num()*Y_const*X_const - 1;
+            for (y = 0; y < Y_const; y++){
+                for (x = 0; x < X_const; x++){
+                    *(++d_filters_tmp) = 0.f;
+                } // x
+            } // y
+            d_filters_tmp = SCRATCH + 2*omp_get_thread_num()*Y_const*X_const - 1;
+
+            int kcyx_shift = (k*C_const + c)*Y_const*X_const - 1;
+            for (h = 0; h < pooled_H_const; h++){
+                for (w = 0; w < pooled_W_const; w++){
+                    
+                    lin_index = *(++argmaxs_pointer);
+                    h_arg = lin_index/output_W_const;
+                    w_arg = lin_index - h_arg*output_W_const;
+
+                    float d_pooled_outputs_value = *d_pooled_outputs_pointer;
+
+                    // float *restrict d_filters_pointer = D_FILTERS + kcyx_shift;
+                    float *restrict d_filters_pointer = d_filters_tmp;
+
+                    if ((w_arg - padding_const >= 0) &&
+                        (h_arg - padding_const >= 0) &&
+                        (output_W_const - 1 - w_arg >= padding_const) &&
+                        (output_H_const - 1 - h_arg >= padding_const)){
+                        
+                        float *restrict inputs_pointer = INPUTS + (w_arg-padding_const) + (h_arg-padding_const)*W_const + ncHW - 1;
+                        // if ((w_arg-padding_const) < 0) {printf("\n\n W"); break; break; break; break;}
+                        // if (((w_arg-padding_const) + (h_arg-padding_const)*W_const) < 0) {printf("\n\n JOINT"); break; break; break; break;}
+                        float value = 0.f;
+                        for (y = 0; y < Y_const; y++){
+                            for (x = 0; x < X_const; x++){
+                                *(++d_filters_pointer) += d_pooled_outputs_value * (*(++inputs_pointer)); // kcyx += nkhw * inputs_ind
+                            } // x
+                            inputs_pointer += XW;
+                        } // y
+
+                    }
+                    else{
+                        float *restrict inputs_pointer = INPUTS + ncHW - 1 + mx(mn(h_arg-padding_const, H_const-1), 0)*W_const + mx(mn(w_arg-padding_const, W_const-1), 0);
+
+                        for (y = 0; y < Y_const; ++y){
+                            float *restrict inputs_pointer_ncyX = inputs_pointer; // start-of-line pointer
+                            if ((y + h_arg - padding_const >= 0) && (y + h_arg - padding_const < H_const)){
+                                for (x = 0; x < X_const; ++x){
+                                    d_filters_pointer++;
+                                    if ((x + w_arg - padding_const >= 0) && (x + w_arg - padding_const < W_const))
+                                        *d_filters_pointer += (*d_pooled_outputs_pointer) * (*(++inputs_pointer)); 
+                                } // x
+                            }
+
+                            else d_filters_pointer += X_const; // advance pointer without going into loop
+                            inputs_pointer = inputs_pointer_ncyX + W_const; 
+                        } // y
+
+                        // for (y = 0; y < Y_const; y++){
+                        //     float *restrict inputs_pointer_ncyX = inputs_pointer; // start-of-line pointer
+                        //     for (x = 0; x < X_const; x++){
+                               
+                        //         d_filters_pointer++;
+                        //         if ((y + h_arg - padding_const >= 0) && (y + h_arg - padding_const < H_const) && (x + w_arg - padding_const >= 0) && (x + w_arg - padding_const < W_const))
+                        //             *d_filters_pointer += (*d_pooled_outputs_pointer) * (*(++inputs_pointer)); // kcyx += nkhw * inputs_ind
+
+                        //     } // x
+
+                        //     inputs_pointer = inputs_pointer_ncyX + W_const;
+                        // } // y
+                    }
+                    d_pooled_outputs_pointer++;
+                } // w
+            } // h
+
+            float *restrict d_filters_pointer = D_FILTERS + kcyx_shift;
+            for (y = 0; y < Y_const; y++){
+                for (x = 0; x < X_const; x++){
+                    *(++d_filters_pointer) -= *(++d_filters_tmp); // kcyx += nkhw * inputs_ind
+                } // x
+            } // y
+        } // nkc
+  
+  }
+}
+
 
 int *convolve_argmaxs_fixed_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded){
 
@@ -4206,9 +4817,10 @@ void local_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int K, int
                                 for (x = 0; x < X_constL; ++x){
                                     filters_pointer++;
                                     d_filters_pointer++;
-                                    if ((x + w - padding_constL >= 0) && (x + w - padding_constL < W_constL))
+                                    if ((x + w - padding_constL >= 0) && (x + w - padding_constL < W_constL)){
                                         *d_filters_pointer += (*d_outputs_pointer) * (*(++inputs_pointer));
                                         *(++d_inputs_pointer) += (*d_outputs_pointer) * (*filters_pointer); 
+                                    }
                                 } // x
                             }
 
@@ -4494,9 +5106,10 @@ void local_gradient_layer2(int N, int C, int H, int W, float *INPUTS, int K, int
                                 for (x = 0; x < X_constL2; ++x){
                                     filters_pointer++;
                                     d_filters_pointer++;
-                                    if ((x + w - padding_constL2 >= 0) && (x + w - padding_constL2 < W_constL2))
+                                    if ((x + w - padding_constL2 >= 0) && (x + w - padding_constL2 < W_constL2)){
                                         *d_filters_pointer += (*d_outputs_pointer) * (*(++inputs_pointer));
                                         *(++d_inputs_pointer) += (*d_outputs_pointer) * (*filters_pointer); 
+                                    }
                                 } // x
                             }
 
