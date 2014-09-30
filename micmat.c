@@ -110,7 +110,18 @@ void tester(){
 
 float *allocate_host(int N){
     float *A = _mm_malloc(N*sizeof(float), ALIGN);
+    __assume_aligned(A, ALIGN);
     // float *A = (float *) malloc(N*sizeof(float));
+    if (A == NULL){
+        fprintf(stderr, "Out of memory.\n");
+    }
+
+    return A;
+}
+
+float *allocate_host_unaligned(int N){
+    // float *A = _mm_malloc(N*sizeof(float), ALIGN);
+    float *A = (float *) malloc(N*sizeof(float));
     if (A == NULL){
         fprintf(stderr, "Out of memory.\n");
     }
@@ -121,6 +132,8 @@ float *allocate_host(int N){
 int *allocate_host_int(int N){
     // int *A = (int *) malloc(N*sizeof(int));
     int *A = _mm_malloc(N*sizeof(int), ALIGN);
+    __assume_aligned(A, ALIGN);
+    
     if (A == NULL){
         fprintf(stderr, "Out of memory.\n");
     }
@@ -573,7 +586,8 @@ void print_slice_mic(int ROWS, int COLS, float *A){
     }
 
   // print_slice(6, 6, B);
-  free(B);
+  // free(B);
+    _mm_free(B);
 }
 
 void offload_mic(int N, float *restrict A){
@@ -612,7 +626,8 @@ void pull_mic(int N, float *restrict A){
 
 float *unalign_host(int N, float *restrict A){
 
-    float *restrict B = allocate_host(N);
+    // float *restrict B = allocate_host(N);
+    float *restrict B = allocate_host_unaligned(N);
     int n;
     #pragma omp parallel for private(n)
     for (n = 0; n < N; n++) B[n] = A[n];
@@ -1238,8 +1253,8 @@ void update_const(int N, float *restrict A, float c){
         { 
           float *restrict Y = ones_mic(N);
           cblas_saxpy(N, c, Y, 1, A, 1);
-          // _mm_free(Y);
-          free(Y);
+          _mm_free(Y);
+          // free(Y);
         }
 }
 
@@ -1290,7 +1305,8 @@ void fill_geometric(int skip_num, int N, float *restrict A, float p){
 
       for (int n = 0; n < N; n++) A[n] = (float) (B[n] + 1);
 
-      free(B);
+        _mm_free(B);
+      // free(B);
     }
 }
 
@@ -1414,7 +1430,8 @@ float *sum_axis(int ROWS_A, int COLS_A, float *restrict A, int AXIS){
         {
             float *restrict Y = ones_mic(ROWS_A);
             dot_mic(1, ROWS_A, Y, COLS_A, A, S);
-            free(Y);
+            // free(Y);
+            _mm_free(Y);
         }
     }
     else if (AXIS == 1){
@@ -1426,7 +1443,8 @@ float *sum_axis(int ROWS_A, int COLS_A, float *restrict A, int AXIS){
         {   
             float *restrict Y = ones_mic(COLS_A);
             dot_mic(ROWS_A, COLS_A, A, 1, Y, S);
-            free(Y);
+            // free(Y);
+            _mm_free(Y);
         }
     }
     else if (AXIS == 2){ 
@@ -1438,7 +1456,8 @@ float *sum_axis(int ROWS_A, int COLS_A, float *restrict A, int AXIS){
         {   
             float *restrict Y = ones_mic(ROWS_A*COLS_A);
             S[0] = cblas_sdot(ROWS_A*COLS_A, A, 1, Y, 1);
-            free(Y);
+            // free(Y);
+            _mm_free(Y);
         }
     }
 
@@ -1472,7 +1491,8 @@ float *sum_axis_replace(int ROWS_A, int COLS_A, float *restrict A, int AXIS, flo
         {   
             float *restrict Y = ones_mic(COLS_A);
             dot_mic(ROWS_A, COLS_A, A, 1, Y, S);
-            free(Y);
+            // free(Y);
+            _mm_free(Y);
         }
     }
     else if (AXIS == 2){ 
@@ -1482,7 +1502,8 @@ float *sum_axis_replace(int ROWS_A, int COLS_A, float *restrict A, int AXIS, flo
         {   
             float *restrict Y = ones_mic(ROWS_A*COLS_A);
             S[0] = cblas_sdot(ROWS_A*COLS_A, A, 1, Y, 1);
-            free(Y);
+            // free(Y);
+            _mm_free(Y);
         }
     }
 
@@ -1633,8 +1654,8 @@ float sumo(int N, float *restrict A){
         {   
             float *restrict Y = ones_mic(N);
             S = cblas_sdot(N, A, 1, Y, 1);
-            // _mm_free(Y);
-            free(Y);
+            _mm_free(Y);
+            // free(Y);
         }
         return S;
 }
@@ -2023,7 +2044,7 @@ void response_normalization_gradient(int N, int K, int H, int W, float *restrict
 
 
 int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
-
+    
     assert(C == C_const);
     assert(H == H_const);
     assert(W == W_const);
@@ -2058,6 +2079,8 @@ int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int 
             default(none) \
             private(nk, ij, n_block, n, k, h, w, c, y, x, i, j) \
             shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XWN, HYWN)
+
+        // #pragma vector aligned
         
         // for each example, for each filter, for each pooling region...
         for (nk = 0; nk < N/BLOCK*K_const; nk++){
@@ -2498,7 +2521,7 @@ int *convolve_and_pool_layer1(int N, int C, int H, int W, float *restrict INPUTS
                     HYW = (H_const-Y_const)*W_const;
 
         // pre-compute indices over channels, width and height of elements to be summed in convolution
-        int *restrict indices = malloc(C_const*Y_const*X_const*sizeof(int));
+        int *restrict indices = _mm_malloc(C_const*Y_const*X_const*sizeof(int), ALIGN);
         int *restrict indices_pointer = indices - 1;
         int index = -1;
         for (c = 0; c < C_const; ++c){
@@ -2711,7 +2734,7 @@ int *convolve_and_pool_shadow_layer1(int N, int C, int H, int W, float *restrict
                     HYW = (H_const-Y_const)*W_const;
 
         // pre-compute indices over channels, width and height of elements to be summed in convolution
-        int *restrict indices = malloc(C_const*Y_const*X_const*sizeof(int));
+        int *restrict indices = _mm_malloc(C_const*Y_const*X_const*sizeof(int), ALIGN);
         int *restrict indices_pointer = indices - 1;
         int index = -1;
         for (c = 0; c < C_const; ++c){
@@ -3581,7 +3604,7 @@ int *convolve_and_pool_layer2(int N, int C, int H, int W, float *restrict INPUTS
         int XW = -X_const2 + W_const2,
                     HYW = (H_const2-Y_const2)*W_const2;
 
-        int *restrict indices = malloc(C_const2*Y_const2*X_const2*sizeof(int));
+        int *restrict indices = _mm_malloc(C_const2*Y_const2*X_const2*sizeof(int), ALIGN);
         int *restrict indices_pointer = indices - 1;
         int index = -1;
         for (c = 0; c < C_const2; ++c){
@@ -4866,7 +4889,7 @@ void local_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int
         int XW = -X_constL + W_constL,
                     HYW = (H_constL-Y_constL)*W_constL;
 
-        int *restrict indices = malloc(C_constL*Y_constL*X_constL*sizeof(int));
+        int *restrict indices = _mm_malloc(C_constL*Y_constL*X_constL*sizeof(int), ALIGN);
         int *restrict indices_pointer = indices - 1;
         int index = -1;
         for (c = 0; c < C_constL; ++c){
@@ -5281,7 +5304,7 @@ void local_layer2(int N, int C, int H, int W, float *restrict INPUTS, int K, int
         int XW = -X_constL2 + W_constL2,
                     HYW = (H_constL2-Y_constL2)*W_constL2;
 
-        int *restrict indices = malloc(C_constL2*Y_constL2*X_constL2*sizeof(int));
+        int *restrict indices = _mm_malloc(C_constL2*Y_constL2*X_constL2*sizeof(int), ALIGN);
         int *restrict indices_pointer = indices - 1;
         int index = -1;
         for (c = 0; c < C_constL2; ++c){
@@ -5553,7 +5576,7 @@ void convolve(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, fl
   in(FILTERS:length(0) REUSE) \ 
   in(OUTPUTS:length(0) REUSE)
   {
-      float *output_scratch = (float *) malloc((H + Y - 1)*(W + X - 1)*sizeof(float));
+      float *output_scratch = (float *) _mm_malloc((H + Y - 1)*(W + X - 1)*sizeof(float), ALIGN);
 
       // convolution mode can also be set manually to be VSL_CONV_MODE_FFT, VSL_CONV_MODE_DIRECT
       int INPUTS_SHAPE[] = {H, W};
@@ -5601,7 +5624,8 @@ void convolve(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, fl
           vslConvDeleteTask(&ConvTask);
       }
 
-    free(output_scratch);      
+    // free(output_scratch);    
+    _mm_free(output_scratch);  
   }
 
 }
