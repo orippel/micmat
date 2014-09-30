@@ -105,13 +105,13 @@ def main():
     np.set_printoptions(precision = 4, suppress = True)
 
     time_only = True
-    test_gradient = True
+    test_gradient = False
     offload = True
     
     if time_only:
         block = 128
-        N = 512
-        K = 512
+        N = 128
+        K = 64
         c = 64
         H = 13
         W = 13
@@ -279,19 +279,19 @@ def test_convolution(time_only, test_gradient, offload, N, K, c, H, W, X, Y, str
             print 'Convolution test passed. '
 
         else:
-            print 'Convolution test failed with difference %f. ' % difference,
+            print 'Convolution test failed with difference %f. ' % difference
             print (outputs.ndarray() - pooled_outputs_np)[0, 0, :, :]
             print ''
             
-            # for k in range(K):
-            #     for n in range(N):
-            #         print (k, n)
-            #         print outputs.ndarray()[k, :, :, n]
-            #         print ''
-            #         print pooled_outputs_np[k, :, :, n]
-            #         print ''
-            #         print (outputs.ndarray() - pooled_outputs_np)[k, :, :, n]
-            #         print ''
+            for k in range(K):
+                for n in range(N):
+                    print (k, n)
+                    print outputs.ndarray()[k, :, :, n]
+                    print ''
+                    print pooled_outputs_np[k, :, :, n]
+                    print ''
+                    print (outputs.ndarray() - pooled_outputs_np)[k, :, :, n]
+                    print ''
 
             print outputs
             print np.reshape(pooled_outputs_np[0, 0, :, :], pooled_outputs_np.shape[2:])
