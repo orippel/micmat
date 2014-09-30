@@ -105,20 +105,20 @@ def main():
     np.set_printoptions(precision = 4, suppress = True)
 
     time_only = True
-    test_gradient = False
+    test_gradient = True
     offload = True
     
     if time_only:
-        block = 16
-        N = 128
-        K = 64
+        block = 128
+        N = 512
+        K = 512
         c = 64
         H = 13
         W = 13
         X = 5
         Y = 5
         stride = 1
-        padding = 2
+        padding = 0
         pooling_radius = 3
         pooling_stride = 2
     
@@ -304,8 +304,8 @@ def test_convolution(time_only, test_gradient, offload, N, K, c, H, W, X, Y, str
 
             print 'Computing convolution gradient now.'
             timer.tic()
-            gradient_filters.convolve_gradient(inputs, filters, argmaxs,
-                gradient_pooled_outputs, gradient_inputs, stride, padding, pooling_radius, pooling_stride, 1, scratch, shadow)
+            gradient_filters.convolution_gradient(inputs, filters, argmaxs,
+                gradient_pooled_outputs, gradient_inputs, stride, padding, pooling_radius, pooling_stride, 1, scratch)
             convolution_gradient_time = timer.toc()
 
             print '\n \n Time: %f seconds.' % convolution_gradient_time

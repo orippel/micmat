@@ -681,6 +681,30 @@ cdef class MICMat:
             #else:
                 #cmicmat.convolve_argmaxs_fixed_layer2(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded)
 
+    def convolution_gradient(self, MICMat inputs, MICMat filters, MICMat argmaxs,
+        MICMat gradient_pooled_outputs, MICMat gradient_inputs, 
+        int stride, int padding, int pooling_radius, int pooling_stride, layer, MICMat scratch):
+        # self is the filters gradient
+        C, H, W, N = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
+        K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
+
+        output_H = (H + 2*padding - Y + 1)/stride
+        output_W = (W + 2*padding - X + 1)/stride
+        pooled_H = (output_H - pooling_radius + 1)/pooling_stride
+        pooled_W = (output_W - pooling_radius + 1)/pooling_stride
+        
+        assert self.shape == filters.shape, 'Filter shape is ' + self.shape + ' rather than ' + `filters.shape` + '.'
+        assert gradient_inputs.shape == inputs.shape, 'gradient_inputs shape is ' + gradient_inputs.shape + ' rather than ' + `inputs.shape` + '.'
+        assert gradient_pooled_outputs.shape == (K, pooled_H, pooled_W, N), 'gradient_pooled_outputs shape is ' + `gradient_pooled_outputs.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
+        
+        if layer == 1:
+            cmicmat.convolution_gradient_layer1(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+                gradient_inputs.A, self.A, scratch.A)
+
+        elif layer == 2:
+            cmicmat.convolve_gradient_layer2(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+                gradient_inputs.A, self.A, scratch.A)
+
     def convolve_and_pool_replace(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch, shadow):
         # asserts that check number of dimensions, sizes, etc
 
