@@ -1885,6 +1885,7 @@ int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int 
             HYWN = (H_const-Y_const)*W_const*N;        
 
         // SCRATCH[0:K_const*N*output_H_const*output_W_const] = 0.f;
+
         #pragma omp parallel for \
             schedule(dynamic) \
             default(none) \
@@ -1900,15 +1901,16 @@ int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int 
             n = n_block*BLOCK;
             k = md(nk, K_const);
 
-            float *restrict convolutions = SCRATCH + ti(k, 0, 0, n, output_H_const, output_W_const, N);
-            for (hw = 0; hw < output_H_const*output_W_const; hw++) convolutions[hw*N : BLOCK] = 0.f;
+            SCRATCH[omp_get_thread_num()*output_H_const*output_W_const*BLOCK : output_H_const*output_W_const*BLOCK] = 0.f;
+            // float *restrict convolutions = SCRATCH + ti(k, 0, 0, n, output_H_const, output_W_const, N);
+            // for (hw = 0; hw < output_H_const*output_W_const; hw++) convolutions[hw*N : BLOCK] = 0.f;
 
             for (c = 0; c < C_const; c++){
                 for (h = 0; h < output_H_const; h++){
                     for (w = 0; w < output_W_const; w++){
 
-                        float *restrict convolutions = SCRATCH + ti(k, h, w, n, output_H_const, output_W_const, N);
-                        // float *restrict convolutions = SCRATCH + BLOCK*omp_get_thread_num();
+                        // float *restrict convolutions = SCRATCH + ti(k, h, w, n, output_H_const, output_W_const, N);
+                        float *restrict convolutions = SCRATCH + ti(omp_get_thread_num(), h, w, 0, output_H_const, output_W_const, BLOCK);
 
                         int kcyx_shift = (k*C_const + c)*Y_const*X_const - 1; // filters
                                 
@@ -1960,28 +1962,18 @@ int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int 
                     } // w
                 } // h
             } // c
-        } //nk
 
-        // ~=~=~=~=~=~=~=~= POOLING ~=~=~=~=~=~=~=~= 
-        #pragma omp parallel for \
-            schedule(dynamic) \
-            default(none) \
-            private(nk, ij, n_block, n, k, h, w, c, y, x, i, j) \
-            shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XWN, HYWN)
-        
-        // for each example, for each filter, for each pooling region...
-        for (nk = 0; nk < N/BLOCK*K_const; nk++){
-            n_block = nk / K_const;
-            n = n_block*BLOCK;
-            k = md(nk, K_const);
 
+            // ~=~=~=~=~=~=~=~= POOLING ~=~=~=~=~=~=~=~= 
             for (h = 0; h < pooled_H_const; h++){
                 for (w = 0; w < pooled_W_const; w++){
 
                     int h_output = h*pooling_stride_const;
                     int w_output = w*pooling_stride_const;
 
-                    float *restrict outputs_pointer = SCRATCH + ti(k, h_output, w_output, n, output_H_const, output_W_const, N);
+                    // float *restrict outputs_pointer = SCRATCH + ti(k, h_output, w_output, n, output_H_const, output_W_const, N);
+                    float *restrict outputs_pointer = SCRATCH + ti(omp_get_thread_num(), h_output, w_output, 0, output_H_const, output_W_const, BLOCK);
+                    
                     // int *restrict argmaxs_pointer = ARGMAXS + ti(k, h_output, w_output, n, output_H_const, output_W_const, N);
                     int *restrict argmaxs_pointer = ARGMAXS + ti(k, h, w, n, pooled_H_const, pooled_W_const, N);
                     float *restrict pooled_outputs_pointer = OUTPUTS + ti(k, h, w, n, pooled_H_const, pooled_W_const, N);
@@ -1997,15 +1989,15 @@ int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int 
                                 argmaxs_pointer[0 : BLOCK] = outputs_index;
                             }
                             outputs_index++;
-                            outputs_pointer += N;
+                            outputs_pointer += BLOCK;
                         }
-                        outputs_index += (output_W_const - pooling_radius_const);
-                        outputs_pointer += (output_W_const - pooling_radius_const)*N;
+                        outputs_index += output_W_const - pooling_radius_const;
+                        outputs_pointer += (output_W_const - pooling_radius_const)*BLOCK;
                     }
 
                 }
             }
-        }
+        } //nk
 
     } // pragma_offload
 }
