@@ -110,8 +110,8 @@ def main():
     
     if time_only:
         block = 128
-        N = 128
-        K = 64
+        N = 512
+        K = 512
         c = 64
         H = 13
         W = 13
