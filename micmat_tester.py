@@ -17,6 +17,108 @@ import os
 from sys import *
 import subprocess
 
+def main():
+
+    np.set_printoptions(precision = 4, suppress = True)
+
+    time_only = True
+    test_gradient = False
+    offload = True
+    
+    if time_only:
+        block = 64
+        N = 128
+        K = 64
+        c = 64
+        H = 13
+        W = 13
+        X = 5
+        Y = 5
+        stride = 1
+        padding = 0
+        pooling_radius = 3
+        pooling_stride = 2
+    
+    else:
+        block = 64
+        N = 256
+        K = 4
+        c = 3
+        H = 6
+        W = 6
+        X = 3
+        Y = 3
+        stride = 1
+        padding = 2
+        pooling_radius = 3
+        pooling_stride = 2
+
+
+    shadow = False
+    K_preshadow = K
+    if shadow:
+        K *= 2
+    
+    global C, stream, timer
+    timer = Timer()
+
+    recompile_MICMat(N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, block)
+    import micmat_wrap as C
+
+    stream = C.RandGen()
+    
+    scratch = C.Scratch((1e8, 1))
+    scratch.offload_mic()
+    scratch.fill_zeros()
+
+    C.check_mic_status()
+
+    test_convolution(time_only, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow)
+
+    # inputs = C.MICMat((N, K, H, W)).offload_mic().fill_zeros()
+    # outputs = inputs.deepcopy()
+    # d_inputs = inputs.deepcopy()
+    # d_outputs = outputs.deepcopy()
+
+    # scratch.reset(inputs)
+
+    # alpha = 0.0001
+    # beta = 0.75
+    # local_radius = 4
+
+    # timer.tic()
+    # outputs.response_normalization(inputs, alpha, beta, local_radius)
+    # test_time = timer.toc()
+
+    # timer.tic()
+    # d_inputs.response_normalization_gradient(inputs, outputs, d_inputs, alpha, beta, local_radius)
+    # grad_time = timer.toc()
+
+    # num_operations = N*K*H*W*(2*local_radius + 1)
+    # print '\n \n Response normalization time: %f seconds.' % test_time
+    # print 'Speed: %f Gflops.' % (num_operations/test_time*1e-9)
+
+    # print '\n \n Response normalization gradient time: %f seconds.' % grad_time
+    # print 'Speed: %f Gflops.' % (num_operations/grad_time*1e-9)
+    
+
+class Timer:
+    def __init__(self):
+        self.start_time = None
+        self.end_time = None
+
+    def tic(self):
+        self.start_time = time.time()
+
+    def toc(self):
+        self.end_time = time.time()
+        self.total_time = self.end_time - self.start_time
+
+        return self.total_time
+
+    def elapsed(self):
+        print 'Elapsed: %s.' % (time.time() - self.start_time)
+
 
 def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, block):
     
@@ -100,108 +202,6 @@ def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooli
     path.append(SPECIFIC_MICMAT_PATH)
     subprocess.call(MICMAT_PATH + 'micmat_build_specific.sh', cwd = MICMAT_PATH, env = os.environ)
 
-def main():
-
-    np.set_printoptions(precision = 4, suppress = True)
-
-    time_only = True
-    test_gradient = False
-    offload = True
-    
-    if time_only:
-        block = 128
-        N = 512
-        K = 512
-        c = 1
-        H = 13
-        W = 13
-        X = 5
-        Y = 5
-        stride = 1
-        padding = 0
-        pooling_radius = 3
-        pooling_stride = 2
-    
-    else:
-        block = 2
-        N = 16
-        K = 4
-        c = 3
-        H = 6
-        W = 6
-        X = 3
-        Y = 3
-        stride = 1
-        padding = 2
-        pooling_radius = 3
-        pooling_stride = 2
-
-
-    shadow = False
-    K_preshadow = K
-    if shadow:
-        K *= 2
-    
-    global C, stream, timer
-    timer = Timer()
-
-    recompile_MICMat(N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, block)
-    import micmat_wrap as C
-
-    stream = C.RandGen()
-    
-    scratch = C.Scratch((1e8, 1))
-    scratch.offload_mic()
-    scratch.fill_zeros()
-
-    C.check_mic_status()
-
-    test_convolution(time_only, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow)
-
-    # inputs = C.MICMat((N, K, H, W)).offload_mic().fill_zeros()
-    # outputs = inputs.deepcopy()
-    # d_inputs = inputs.deepcopy()
-    # d_outputs = outputs.deepcopy()
-
-    # scratch.reset(inputs)
-
-    # alpha = 0.0001
-    # beta = 0.75
-    # local_radius = 4
-
-    # timer.tic()
-    # outputs.response_normalization(inputs, alpha, beta, local_radius)
-    # test_time = timer.toc()
-
-    # timer.tic()
-    # d_inputs.response_normalization_gradient(inputs, outputs, d_inputs, alpha, beta, local_radius)
-    # grad_time = timer.toc()
-
-    # num_operations = N*K*H*W*(2*local_radius + 1)
-    # print '\n \n Response normalization time: %f seconds.' % test_time
-    # print 'Speed: %f Gflops.' % (num_operations/test_time*2e-9)
-
-    # print '\n \n Response normalization gradient time: %f seconds.' % grad_time
-    # print 'Speed: %f Gflops.' % (num_operations/grad_time*2e-9)
-    
-
-class Timer:
-    def __init__(self):
-        self.start_time = None
-        self.end_time = None
-
-    def tic(self):
-        self.start_time = time.time()
-
-    def toc(self):
-        self.end_time = time.time()
-        self.total_time = self.end_time - self.start_time
-
-        return self.total_time
-
-    def elapsed(self):
-        print 'Elapsed: %s.' % (time.time() - self.start_time)
-
 
 def test_convolution(time_only, test_gradient, offload, N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow):
     output_H = (H + 2*padding - Y + 1)/stride
@@ -235,14 +235,25 @@ def test_convolution(time_only, test_gradient, offload, N, K, c, H, W, X, Y, str
         filters.fill_randn(stream, 0., 1.)
 
     print 'Computing convolution now.'
+    # timer.tic()
+    inputs_tmp = scratch.reset(inputs)
+    inputs.interleave_block(inputs_tmp)
+    outputs_tmp = scratch.reset(outputs)
+    outputs.interleave_block(inputs_tmp)
+    # timer.elapsed()
+
     timer.tic()
     outputs.convolution(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, False, scratch)
     test_time = timer.toc()
 
+    inputs_tmp = scratch.reset(inputs)
+    inputs.uninterleave_block(inputs_tmp)
+    outputs_tmp = scratch.reset(outputs)
+    outputs.uninterleave_block(inputs_tmp)
     # print outputs
 
     print '\n \n Convolution time: %f seconds.' % test_time
-    print 'Speed: %f Gflops.' % (num_operations/test_time*2e-9)
+    print 'Speed: %f Gflops.' % (num_operations/test_time*1e-9)
 
     # timer.tic()
     # outputs.convolve_and_pool_replace(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, True, scratch, shadow)
@@ -309,7 +320,7 @@ def test_convolution(time_only, test_gradient, offload, N, K, c, H, W, X, Y, str
             convolution_gradient_time = timer.toc()
 
             print '\n \n Time: %f seconds.' % convolution_gradient_time
-            print 'Speed: %f Gflops.' % (num_operations_gradient/convolution_gradient_time*2e-9)
+            print 'Speed: %f Gflops.' % (num_operations_gradient/convolution_gradient_time*1e-9)
 
 
 def test_local(time_only, offload, N, K, c, H, W, X, Y, stride, padding, scratch):
@@ -344,7 +355,7 @@ def test_local(time_only, offload, N, K, c, H, W, X, Y, stride, padding, scratch
     # outputs.fill_zeros()
 
     print '\n \n Local time: %f seconds.' % test_time
-    print 'Speed: %f Gflops.' % (num_operations/test_time*2e-9)
+    print 'Speed: %f Gflops.' % (num_operations/test_time*1e-9)
 
     if not time_only:
         print 'Running convolution test. '
@@ -375,7 +386,7 @@ def test_local(time_only, offload, N, K, c, H, W, X, Y, stride, padding, scratch
         local_gradient_time = timer.toc()
 
         print '\n \n Time: %f seconds.' % local_gradient_time
-        print 'Speed: %f Gflops.' % (num_operations_gradient/local_gradient_time*2e-9)
+        print 'Speed: %f Gflops.' % (num_operations_gradient/local_gradient_time*1e-9)
 
 
 def test_update(time_only, offload):
@@ -416,7 +427,7 @@ def test_update(time_only, offload):
 
     else:
         print 'Time: %f seconds.' % test_time
-        print 'Speed: %f Gflops.' % (num_operations/test_time*2e-9)
+        print 'Speed: %f Gflops.' % (num_operations/test_time*1e-9)
 
 def test_sum(time_only, offload):
     
@@ -456,7 +467,7 @@ def test_sum(time_only, offload):
 
     else:
         print 'Time: %f seconds.' % test_time
-        print 'Speed: %f Gflops.' % (num_operations/test_time*2e-9)
+        print 'Speed: %f Gflops.' % (num_operations/test_time*1e-9)
 
 stream = None
 timer = None
