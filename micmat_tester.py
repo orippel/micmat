@@ -22,7 +22,7 @@ def main():
     np.set_printoptions(precision = 4, suppress = True)
 
     time_only = True
-    test_gradient = False
+    test_gradient = True
     offload = True
     
     if time_only:
