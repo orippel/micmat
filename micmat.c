@@ -1853,7 +1853,7 @@ void response_normalization_gradient(int N, int K, int H, int W, float *restrict
 
 }
 
-
+// Convolution before changing data structure to [N, C, H, W, BLOCK]
 // int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
 
 //     assert(C == C_const);
@@ -2087,6 +2087,157 @@ void response_normalization_gradient(int N, int K, int H, int W, float *restrict
 //     } // pragma_offload
 // }
 
+// Convolution after changing to [N_BLOCK, C, H, W, BLOCK] data structure, before the intrinsics
+// int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
+
+//     assert(C == C_const);
+//     assert(H == H_const);
+//     assert(W == W_const);
+//     assert(K == K_const);
+//     assert(stride == stride_const);
+//     assert(padding == padding_const);
+//     assert(pooling_radius == pooling_radius_const);
+//     assert(pooling_stride == pooling_stride_const);
+//     assert(X == X_const);
+//     assert(Y == Y_const);
+//     assert(output_H_const == (H_const + 2*padding_const - Y_const + 1)/stride_const);
+//     assert(output_W_const == (W_const + 2*padding_const - X_const + 1)/stride_const);
+//     assert(pooled_H_const == (output_H_const - pooling_radius_const + 1)/pooling_stride_const);
+//     assert(pooled_W_const == (output_W_const - pooling_radius_const + 1)/pooling_stride_const);
+
+//     #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \ 
+//     in(INPUTS:length(0) REUSE) \ 
+//     in(FILTERS:length(0) REUSE) \ 
+//     in(OUTPUTS:length(0) REUSE) \
+//     in(ARGMAXS:length(0) REUSE) \
+//     in(SCRATCH:length(0) REUSE)
+//     {
+//         int n_block, n, k, i, j, h, w, c, y, x;
+//         int nk, hw, ij, nkhw;
+
+//         // computation of constants
+//         int XWN = (-X_const + W_const)*N,
+//             HYWN = (H_const-Y_const)*W_const*N;        
+
+//         // SCRATCH[0:K_const*N*output_H_const*output_W_const] = 0.f;
+
+//         #pragma omp parallel for \
+//             schedule(dynamic) \
+//             default(none) \
+//             private(nk, hw, ij, n_block, n, k, h, w, c, y, x, i, j) \
+//             shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XWN, HYWN)
+
+//         // #pragma vector aligned
+        
+//         // ~=~=~=~=~=~=~=~= CONVOLUTION ~=~=~=~=~=~=~=~= 
+//         for (nk = 0; nk < N/BLOCK*K_const; nk++){
+            
+//             n_block = nk / K_const;
+//             n = n_block*BLOCK;
+//             k = md(nk, K_const);
+
+//             SCRATCH[omp_get_thread_num()*output_H_const*output_W_const*BLOCK : output_H_const*output_W_const*BLOCK] = 0.f;
+//             // float *restrict convolutions = SCRATCH + ti(k, 0, 0, n, output_H_const, output_W_const, N);
+//             // for (hw = 0; hw < output_H_const*output_W_const; hw++) convolutions[hw*N : BLOCK] = 0.f;
+
+//             for (c = 0; c < C_const; c++){
+//                 for (h = 0; h < output_H_const; h++){
+//                     for (w = 0; w < output_W_const; w++){
+
+//                         // float *restrict convolutions = SCRATCH + ti(k, h, w, n, output_H_const, output_W_const, N);
+//                         float *restrict convolutions = SCRATCH + ti(omp_get_thread_num(), h, w, 0, output_H_const, output_W_const, BLOCK);
+
+//                         int kcyx_shift = (k*C_const + c)*Y_const*X_const - 1; // filters
+                                
+//                         float *restrict filters_pointer = FILTERS + kcyx_shift;
+                       
+//                         // if we're not on boundary (i.e not affected by padding)
+//                         if (w - padding_const >= 0 &&
+//                             h - padding_const >= 0 &&
+//                             output_W_const - 1 - w >= padding_const  &&
+//                             output_H_const - 1 - h >= padding_const){
+
+//                             float *restrict inputs_pointer = INPUTS + ti5(n_block, c, h - padding_const, w - padding_const, 0, C_const, H_const, W_const, BLOCK);
+                              
+//                             for (y = 0; y < Y_const; ++y){                                
+//                                 for (x = 0; x < X_const; ++x){
+//                                     convolutions[0 : BLOCK] += inputs_pointer[0 : BLOCK] * (*(++filters_pointer));
+//                                     inputs_pointer += BLOCK;
+//                                 } // x
+
+//                                 inputs_pointer += (-X_const + W_const)*BLOCK;
+//                             } // y
+
+//                         }
+
+//                         else{
+//                             float *restrict inputs_pointer = INPUTS + ti5(n_block, c, mx(mn(h-padding_const, H_const-1), 0), mx(mn(w-padding_const, W_const-1), 0), 0, C_const, H_const, W_const, BLOCK);
+                            
+//                             for (y = 0; y < Y_const; ++y){
+                                
+//                                 float *restrict inputs_pointer_y = inputs_pointer; // start-of-line pointer
+                                
+//                                 if ((y + h - padding_const >= 0) && (y + h - padding_const < H_const)){ // i.e, are there any elements in this row that overlap with the image?
+//                                     for (x = 0; x < X_const; ++x){
+//                                         filters_pointer++;
+                                        
+//                                         if ((x + w - padding_const >= 0) && (x + w - padding_const < W_const)){
+//                                             convolutions[0 : BLOCK] += inputs_pointer[0 : BLOCK] * (*filters_pointer);
+//                                             inputs_pointer += BLOCK;
+//                                         }
+//                                     } // x
+
+//                                     inputs_pointer = inputs_pointer_y + W_const*BLOCK; 
+//                                 }
+
+//                                 else filters_pointer += X_const;
+//                             } // y
+
+//                         } // if-else
+//                     } // w
+//                 } // h
+//             } // c
+
+
+//             // ~=~=~=~=~=~=~=~= POOLING ~=~=~=~=~=~=~=~= 
+//             for (h = 0; h < pooled_H_const; h++){
+//                 for (w = 0; w < pooled_W_const; w++){
+
+//                     int h_output = h*pooling_stride_const;
+//                     int w_output = w*pooling_stride_const;
+
+//                     // float *restrict outputs_pointer = SCRATCH + ti(k, h_output, w_output, n, output_H_const, output_W_const, N);
+//                     float *restrict outputs_pointer = SCRATCH + ti(omp_get_thread_num(), h_output, w_output, 0, output_H_const, output_W_const, BLOCK);
+                    
+//                     // int *restrict argmaxs_pointer = ARGMAXS + ti(k, h_output, w_output, n, output_H_const, output_W_const, N);
+//                     int *restrict argmaxs_pointer = ARGMAXS + ti5(n_block, k, h, w, 0, K_const, pooled_H_const, pooled_W_const, BLOCK);
+//                     float *restrict pooled_outputs_pointer = OUTPUTS + ti5(n_block, k, h, w, 0, K_const, pooled_H_const, pooled_W_const, BLOCK);
+//                     pooled_outputs_pointer[0 : BLOCK] = -1.0e6;
+                    
+//                     // float *restrict argmaxs = SCRATCH + K_const*output_H_const*output_W_const*N + ti(k, h, w, n, pooled_H_const, pooled_W_const, N);
+
+//                     int outputs_index = h_output*output_W_const + w_output;
+//                     for (y = 0; y < pooling_radius_const; y++){
+//                         for (x = 0; x < pooling_radius_const; x++){
+//                             if (outputs_pointer[0 : BLOCK] > pooled_outputs_pointer[0 : BLOCK]){
+//                                 pooled_outputs_pointer[0 : BLOCK] = outputs_pointer[0 : BLOCK];
+//                                 argmaxs_pointer[0 : BLOCK] = outputs_index;
+//                             }
+//                             outputs_index++;
+//                             outputs_pointer += BLOCK;
+//                         }
+//                         outputs_index += output_W_const - pooling_radius_const;
+//                         outputs_pointer += (output_W_const - pooling_radius_const)*BLOCK;
+//                     }
+
+//                 }
+//             }
+//         } //nk
+
+//     } // pragma_offload
+// }
+
+// Convolution after changing to [N_BLOCK, C, H, W, BLOCK] data structure, after the intrinsics
 int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
 
     assert(C == C_const);
@@ -2119,14 +2270,11 @@ int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int 
             HYWN = (H_const-Y_const)*W_const*N;        
 
         // SCRATCH[0:K_const*N*output_H_const*output_W_const] = 0.f;
-
         #pragma omp parallel for \
             schedule(dynamic) \
             default(none) \
             private(nk, hw, ij, n_block, n, k, h, w, c, y, x, i, j) \
             shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XWN, HYWN)
-
-        // #pragma vector aligned
         
         // ~=~=~=~=~=~=~=~= CONVOLUTION ~=~=~=~=~=~=~=~= 
         for (nk = 0; nk < N/BLOCK*K_const; nk++){
@@ -2136,8 +2284,6 @@ int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int 
             k = md(nk, K_const);
 
             SCRATCH[omp_get_thread_num()*output_H_const*output_W_const*BLOCK : output_H_const*output_W_const*BLOCK] = 0.f;
-            // float *restrict convolutions = SCRATCH + ti(k, 0, 0, n, output_H_const, output_W_const, N);
-            // for (hw = 0; hw < output_H_const*output_W_const; hw++) convolutions[hw*N : BLOCK] = 0.f;
 
             for (c = 0; c < C_const; c++){
                 for (h = 0; h < output_H_const; h++){
@@ -2145,6 +2291,12 @@ int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int 
 
                         // float *restrict convolutions = SCRATCH + ti(k, h, w, n, output_H_const, output_W_const, N);
                         float *restrict convolutions = SCRATCH + ti(omp_get_thread_num(), h, w, 0, output_H_const, output_W_const, BLOCK);
+                        float *restrict convolutions_next = SCRATCH + ti(omp_get_thread_num(), h, w+1, 0, output_H_const, output_W_const, BLOCK);
+                __assume_aligned(convolutions, 64);
+            _mm_prefetch((char *)(convolutions_next), _MM_HINT_ET0);
+            _mm_prefetch((char *)(convolutions_next + 16), _MM_HINT_ET0);
+            _mm_prefetch((char *)(convolutions_next + 32), _MM_HINT_ET0);
+            _mm_prefetch((char *)(convolutions_next + 48), _MM_HINT_ET0);
 
                         int kcyx_shift = (k*C_const + c)*Y_const*X_const - 1; // filters
                                 
@@ -2156,22 +2308,104 @@ int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int 
                             output_W_const - 1 - w >= padding_const  &&
                             output_H_const - 1 - h >= padding_const){
 
+#if 1 && defined __MIC__
+            __m512 res_1 = _mm512_extload_ps(convolutions, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE);
+            __m512 res_2 = _mm512_extload_ps(convolutions + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE);
+            __m512 res_3 = _mm512_extload_ps(convolutions + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE);
+            __m512 res_4 = _mm512_extload_ps(convolutions + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE);
+#endif
                             float *restrict inputs_pointer = INPUTS + ti5(n_block, c, h - padding_const, w - padding_const, 0, C_const, H_const, W_const, BLOCK);
                               
                             for (y = 0; y < Y_const; ++y){                                
-                                for (x = 0; x < X_const; ++x){
-                                    convolutions[0 : BLOCK] += inputs_pointer[0 : BLOCK] * (*(++filters_pointer));
+                _mm_prefetch((char *)(inputs_pointer + N), _MM_HINT_T0);
+                _mm_prefetch((char *)(inputs_pointer + N + 16), _MM_HINT_T0);
+                _mm_prefetch((char *)(inputs_pointer + N + 32), _MM_HINT_T0);
+                _mm_prefetch((char *)(inputs_pointer + N + 48), _MM_HINT_T0);
+                                for (x = 0; x < X_const; ++x)
+                {
+                        __assume_aligned(inputs_pointer, 64);
+                    filters_pointer++;
+                    _mm_prefetch((char *)(inputs_pointer + N), _MM_HINT_T0);
+                    _mm_prefetch((char *)(inputs_pointer + N + 16), _MM_HINT_T0);
+                    _mm_prefetch((char *)(inputs_pointer + N + 32), _MM_HINT_T0);
+                    _mm_prefetch((char *)(inputs_pointer + N + 48), _MM_HINT_T0);
+#if 1 && defined __MIC__
+                    __m512 v_filters = _mm512_set1_ps(*filters_pointer);
+                    {
+                    res_1 = _mm512_fmadd_ps(_mm512_extload_ps(inputs_pointer +  0, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE), v_filters, res_1); 
+                    res_2 = _mm512_fmadd_ps(_mm512_extload_ps(inputs_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE), v_filters, res_2); 
+                    res_3 = _mm512_fmadd_ps(_mm512_extload_ps(inputs_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE), v_filters, res_3); 
+                    res_4 = _mm512_fmadd_ps(_mm512_extload_ps(inputs_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE), v_filters, res_4); 
+                    }
+#else
+                                    convolutions[0 : BLOCK] += inputs_pointer[0 : BLOCK] * (*(filters_pointer));
+#endif
                                     inputs_pointer += BLOCK;
                                 } // x
 
                                 inputs_pointer += (-X_const + W_const)*BLOCK;
                             } // y
+#if 1 && defined __MIC__
+            _mm512_extstore_ps((float *)(convolutions), res_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+            _mm512_extstore_ps((float *)(convolutions + 16), res_2, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+            _mm512_extstore_ps((float *)(convolutions + 32), res_3, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+            _mm512_extstore_ps((float *)(convolutions + 48), res_4, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+#endif
 
                         }
 
                         else{
+#if 1 && defined __MIC__
+            __m512 res_1 = _mm512_extload_ps(convolutions, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE);
+            __m512 res_2 = _mm512_extload_ps(convolutions + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE);
+            __m512 res_3 = _mm512_extload_ps(convolutions + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE);
+            __m512 res_4 = _mm512_extload_ps(convolutions + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE);
+#endif
                             float *restrict inputs_pointer = INPUTS + ti5(n_block, c, mx(mn(h-padding_const, H_const-1), 0), mx(mn(w-padding_const, W_const-1), 0), 0, C_const, H_const, W_const, BLOCK);
                             
+            int min_x = mx(0, (padding_const - w)); 
+            int max_x = mn(X_const, (W_const + padding_const - w)); 
+            int min_y = mx(0, (padding_const - h)); 
+            int max_y = mn(Y_const, (H_const + padding_const - h)); 
+#if 1
+                filters_pointer += min_y*X_const;
+                            for (y = min_y; y < max_y; ++y){
+                                float *restrict inputs_pointer_y = inputs_pointer; // start-of-line pointer
+                filters_pointer += min_x;
+#pragma unroll (X_const-padding_const)
+#pragma noprefetch
+                                for (x = min_x; x < max_x; ++x)
+                {
+                            __assume_aligned(inputs_pointer, 64);
+                        filters_pointer++;
+                            _mm_prefetch((char *)(inputs_pointer + N), _MM_HINT_T0);
+                            _mm_prefetch((char *)(inputs_pointer + N + 16), _MM_HINT_T0);
+                            _mm_prefetch((char *)(inputs_pointer + N + 32), _MM_HINT_T0);
+                            _mm_prefetch((char *)(inputs_pointer + N + 48), _MM_HINT_T0);
+#if 1 && defined __MIC__
+                            __m512 v_filters = _mm512_set1_ps(*filters_pointer);
+                            {
+                        res_1 = _mm512_fmadd_ps(_mm512_extload_ps(inputs_pointer +  0, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE), v_filters, res_1); 
+                        res_2 = _mm512_fmadd_ps(_mm512_extload_ps(inputs_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE), v_filters, res_2); 
+                        res_3 = _mm512_fmadd_ps(_mm512_extload_ps(inputs_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE), v_filters, res_3); 
+                        res_4 = _mm512_fmadd_ps(_mm512_extload_ps(inputs_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE), v_filters, res_4); 
+                           }
+#else
+                                           convolutions[0 : BLOCK] += inputs_pointer[0 : BLOCK] * (*(filters_pointer));
+#endif
+                                           inputs_pointer += BLOCK;
+                } // x
+                filters_pointer += (X_const - max_x);
+                                inputs_pointer = inputs_pointer_y + W_const*BLOCK; 
+                            } 
+#if 1 && defined __MIC__
+            _mm512_extstore_ps((float *)(convolutions), res_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+            _mm512_extstore_ps((float *)(convolutions + 16), res_2, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+            _mm512_extstore_ps((float *)(convolutions + 32), res_3, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+            _mm512_extstore_ps((float *)(convolutions + 48), res_4, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+#endif
+                filters_pointer += (Y_const - max_y)*X_const;
+#else
                             for (y = 0; y < Y_const; ++y){
                                 
                                 float *restrict inputs_pointer_y = inputs_pointer; // start-of-line pointer
@@ -2191,6 +2425,7 @@ int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int 
 
                                 else filters_pointer += X_const;
                             } // y
+#endif 
 
                         } // if-else
                     } // w
