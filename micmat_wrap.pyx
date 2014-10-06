@@ -651,27 +651,28 @@ cdef class MICMat:
 
         cmicmat.response_normalization_gradient(N, K, H, W, inputs.A, outputs.A, self.A, gradient_outputs.A, alpha, beta, local_radius)
 
-    def interleave_block(self, MICMat inputs):
+    def interleave_block(self, MICMat scratch, int block):
         C, H, W, N = self.shape
-        cmicmat.interleave_block(N, C, H, W, inputs.A, self.A)
+        cmicmat.interleave_block(N, C, H, W, block, self.A, scratch.A)
 
-    def uninterleave_block(self, MICMat inputs):
+    def uninterleave_block(self, MICMat scratch, int block):
         C, H, W, N = self.shape
-        cmicmat.uninterleave_block(N, C, H, W, inputs.A, self.A)
+        cmicmat.uninterleave_block(N, C, H, W, block, self.A, scratch.A)
 
     def convolution(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch):
         # asserts that check number of dimensions, sizes, etc
 
         C, H, W, N = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
-        K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
+        # K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
+        _, Y, X, K = filters.shape
 
         output_H = (H + 2*padding - Y + 1)/stride
         output_W = (W + 2*padding - X + 1)/stride
         pooled_H = (output_H - pooling_radius + 1)/pooling_stride
         pooled_W = (output_W - pooling_radius + 1)/pooling_stride
         
-        assert self.shape == (K, pooled_H, pooled_W, N), 'Output shape is ' + `self.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
-        assert argmaxs.shape == (K, pooled_H, pooled_W, N), 'Argmax shape is ' + `self.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
+        # assert self.shape == (K, pooled_H, pooled_W, N), 'Output shape is ' + `self.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
+        # assert argmaxs.shape == (K, pooled_H, pooled_W, N), 'Argmax shape is ' + `self.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
 
         times = time.time()
         if layer == 1:
@@ -873,6 +874,27 @@ cdef class MICMat:
         S.shape = (self.shape[1], self.shape[0])
 
         return S
+
+    def T_replace(self):
+        cmicmat.T(self.ROWS, self.COLS, self.A)
+        self.shape = (self.shape[1], self.shape[0])
+
+        return self
+
+    def rotate_dimensions(self, MICMat scratch, direction):
+        if direction == 'forward':
+            rows = self.shape[0]
+            cols = np.product(self.shape[1:])
+            self.shape = self.shape[1:] + (self.shape[0],)
+
+        elif direction == 'backward':
+            rows = np.product(self.shape[0:-1])
+            cols = self.shape[-1]
+            self.shape = (self.shape[-1],) + self.shape[0:-1]
+
+        cmicmat.transpose_replace(rows, cols, self.A, scratch.A)
+
+        return self
 
     def dot(self, MICMat V, *args):
         cdef MICMat S

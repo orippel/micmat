@@ -21,13 +21,16 @@ def main():
 
     np.set_printoptions(precision = 4, suppress = True)
 
-    time_only = True
+    time_and_dont_test = True
     test_gradient = True
     offload = True
     
-    if time_only:
-        block = 64
-        N = 512
+    if time_and_dont_test:
+        N_block = 16
+        K_block = 4
+        C_block = 4
+
+        N = 128
         K = 64
         c = 64
         H = 13
@@ -40,12 +43,14 @@ def main():
         pooling_stride = 2
     
     else:
-        block = 64
-        N = 256
-        K = 4
-        c = 3
-        H = 6
-        W = 6
+        N_block = 16
+        K_block = 4
+        C_block = 2
+        N = 128
+        K = 16
+        c = 6
+        H = 7
+        W = 7
         X = 3
         Y = 3
         stride = 1
@@ -62,7 +67,7 @@ def main():
     global C, stream, timer
     timer = Timer()
 
-    recompile_MICMat(N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, block)
+    recompile_MICMat(N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, N_block, K_block, C_block)
     import micmat_wrap as C
 
     stream = C.RandGen()
@@ -73,7 +78,7 @@ def main():
 
     C.check_mic_status()
 
-    test_convolution(time_only, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow)
+    test_convolution(time_and_dont_test, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block)
 
     # inputs = C.MICMat((N, K, H, W)).offload_mic().fill_zeros()
     # outputs = inputs.deepcopy()
@@ -120,7 +125,7 @@ class Timer:
         print 'Elapsed: %s.' % (time.time() - self.start_time)
 
 
-def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, block):
+def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, N_block, K_block, C_block):
     
     OUTPUT_PATH = '/global/homes/r/rippel/sota/output/default/'
     SPECIFIC_MICMAT_PATH = OUTPUT_PATH + 'micmat/'
@@ -137,7 +142,9 @@ def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooli
     
     macros_file = open(SPECIFIC_MICMAT_PATH + 'generated_macros.h', 'w')
     
-    contents = '#define BLOCK ' + `block` + '\n\n' # block size for vectorization
+    contents = '#define N_BLOCK ' + `N_block` + '\n' + \
+            '#define K_BLOCK ' + `K_block` + '\n' + \
+            '#define C_BLOCK ' + `C_block` + '\n\n'
 
     contents += '#define C_const ' + `c` + '\n' + \
             '#define H_const ' + `H` + '\n' + \
@@ -203,7 +210,7 @@ def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooli
     subprocess.call(MICMAT_PATH + 'micmat_build_specific.sh', cwd = MICMAT_PATH, env = os.environ)
 
 
-def test_convolution(time_only, test_gradient, offload, N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow):
+def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block):
     output_H = (H + 2*padding - Y + 1)/stride
     output_W = (W + 2*padding - X + 1)/stride
     pooled_H = (output_H - pooling_radius + 1)/pooling_stride
@@ -236,20 +243,31 @@ def test_convolution(time_only, test_gradient, offload, N, K, c, H, W, X, Y, str
 
     print 'Computing convolution now.'
     # timer.tic()
-    inputs_tmp = scratch.reset(inputs)
-    inputs.interleave_block(inputs_tmp)
-    outputs_tmp = scratch.reset(outputs)
-    outputs.interleave_block(inputs_tmp)
+    inputs.interleave_block(scratch, N_block)
+    outputs.interleave_block(scratch, N_block)
+    
+    filters.rotate_dimensions(scratch, 'forward')
+    filters.interleave_block(scratch, K_block)
+    # timer.elapsed()
+
+    # inputs_tmp = scratch.reset(inputs)
+    # inputs_tmp.shape = inputs.shape[1:] + (inputs.shape[0],)
+    # timer.tic()
+    # inputs_tmp.rotate_dimensions(inputs, 'forward')
+    # inputs.rotate_dimensions(inputs_tmp, 'backward')
     # timer.elapsed()
 
     timer.tic()
     outputs.convolution(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, False, scratch)
+    # outputs.convolve_and_pool_replace(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, False, scratch, shadow)
     test_time = timer.toc()
 
-    inputs_tmp = scratch.reset(inputs)
-    inputs.uninterleave_block(inputs_tmp)
-    outputs_tmp = scratch.reset(outputs)
-    outputs.uninterleave_block(inputs_tmp)
+    inputs.uninterleave_block(scratch, N_block)
+    outputs.uninterleave_block(scratch, N_block)
+
+    filters.uninterleave_block(scratch, K_block)
+    filters.rotate_dimensions(scratch, 'backward')
+    
     # print outputs
 
     print '\n \n Convolution time: %f seconds.' % test_time
@@ -261,7 +279,7 @@ def test_convolution(time_only, test_gradient, offload, N, K, c, H, W, X, Y, str
 
     # print outputs
 
-    if not time_only:
+    if not time_and_dont_test:
         print 'Running convolution test. '
         inputs_np = np.lib.pad(inputs.ndarray(), ((0, 0), (padding, padding), (padding, padding), (0, 0)), 'constant', constant_values = (0, 0))
 
@@ -295,14 +313,14 @@ def test_convolution(time_only, test_gradient, offload, N, K, c, H, W, X, Y, str
             print ''
             
             for k in range(K):
-                for n in range(N):
-                    print (k, n)
-                    print outputs.ndarray()[k, :, :, n]
-                    print ''
-                    print pooled_outputs_np[k, :, :, n]
-                    print ''
-                    print (outputs.ndarray() - pooled_outputs_np)[k, :, :, n]
-                    print ''
+                # for n in range(N):
+                    # print (k, n)
+                print outputs.ndarray()[k, :, :, n]
+                print ''
+                print pooled_outputs_np[k, :, :, n]
+                print ''
+                print (outputs.ndarray() - pooled_outputs_np)[k, :, :, n]
+                print ''
 
             print outputs
             print np.reshape(pooled_outputs_np[0, 0, :, :], pooled_outputs_np.shape[2:])
@@ -323,7 +341,7 @@ def test_convolution(time_only, test_gradient, offload, N, K, c, H, W, X, Y, str
             print 'Speed: %f Gflops.' % (num_operations_gradient/convolution_gradient_time*1e-9)
 
 
-def test_local(time_only, offload, N, K, c, H, W, X, Y, stride, padding, scratch):
+def test_local(time_and_dont_test, offload, N, K, c, H, W, X, Y, stride, padding, scratch):
     output_H = (H + 2*padding - Y + 1)/stride
     output_W = (W + 2*padding - X + 1)/stride
 
@@ -357,7 +375,7 @@ def test_local(time_only, offload, N, K, c, H, W, X, Y, stride, padding, scratch
     print '\n \n Local time: %f seconds.' % test_time
     print 'Speed: %f Gflops.' % (num_operations/test_time*1e-9)
 
-    if not time_only:
+    if not time_and_dont_test:
         print 'Running convolution test. '
         # pure_python = np.zeros((N, K, pooled_H, pooled_W)) - 1e10
         # for n in range(N):
@@ -389,9 +407,9 @@ def test_local(time_only, offload, N, K, c, H, W, X, Y, stride, padding, scratch
         print 'Speed: %f Gflops.' % (num_operations_gradient/local_gradient_time*1e-9)
 
 
-def test_update(time_only, offload):
+def test_update(time_and_dont_test, offload):
     
-    if time_only:
+    if time_and_dont_test:
         shape = (30, 20, 100, 100)
     else:
         shape = (4, 3, 6, 9)
@@ -413,7 +431,7 @@ def test_update(time_only, offload):
     output.update(B, 0.3)
     test_time = timer.toc()
 
-    if not time_only:
+    if not time_and_dont_test:
         pure_python = A.ndarray() + 0.3*B.ndarray()
         
         difference = np.mean(np.abs(output.ndarray() - pure_python))
@@ -429,9 +447,9 @@ def test_update(time_only, offload):
         print 'Time: %f seconds.' % test_time
         print 'Speed: %f Gflops.' % (num_operations/test_time*1e-9)
 
-def test_sum(time_only, offload):
+def test_sum(time_and_dont_test, offload):
     
-    if time_only:
+    if time_and_dont_test:
         shape = (30, 20, 100, 100)
     else:
         shape = (4, 3, 6, 9)
@@ -450,7 +468,7 @@ def test_sum(time_only, offload):
 
     S = A.sum()
 
-    if not time_only:
+    if not time_and_dont_test:
         pure_python = A.ndarray().sum()
         pure_python3 = A.ndarray().sum(axis = 3, keepdims = True)
         
