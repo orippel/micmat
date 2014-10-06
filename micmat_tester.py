@@ -244,7 +244,7 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
     print 'Computing convolution now.'
     # timer.tic()
     inputs.interleave_block(scratch, N_block)
-    outputs.interleave_block(scratch, N_block)
+    # outputs.interleave_block(scratch, N_block)
     
     filters.rotate_dimensions(scratch, 'forward')
     filters.interleave_block(scratch, K_block)
@@ -264,6 +264,7 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
 
     inputs.uninterleave_block(scratch, N_block)
     outputs.uninterleave_block(scratch, N_block)
+    argmaxs.uninterleave_block(scratch, N_block)
 
     filters.uninterleave_block(scratch, K_block)
     filters.rotate_dimensions(scratch, 'backward')

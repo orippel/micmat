@@ -651,13 +651,22 @@ cdef class MICMat:
 
         cmicmat.response_normalization_gradient(N, K, H, W, inputs.A, outputs.A, self.A, gradient_outputs.A, alpha, beta, local_radius)
 
+    def get_argamxs(self, MICMat inputs, MICMat argmaxs):
+        C, H, W, N = self.shape
+        cmicmat.get_argmaxs(N, C, H, W, inputs.A, self.A, argmaxs.A_int)
+
     def interleave_block(self, MICMat scratch, int block):
         C, H, W, N = self.shape
         cmicmat.interleave_block(N, C, H, W, block, self.A, scratch.A)
 
     def uninterleave_block(self, MICMat scratch, int block):
         C, H, W, N = self.shape
-        cmicmat.uninterleave_block(N, C, H, W, block, self.A, scratch.A)
+
+        if self.dtype == 0:
+            cmicmat.uninterleave_block(N, C, H, W, block, self.A, scratch.A)
+
+        elif self.dtype == 1:
+            cmicmat.uninterleave_block_int(N, C, H, W, block, self.A_int, scratch.A)            
 
     def convolution(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch):
         # asserts that check number of dimensions, sizes, etc

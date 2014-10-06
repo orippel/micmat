@@ -179,12 +179,15 @@ void response_normalization(int N, int K, int H, int W, float *INPUTS, float *OU
 
 void response_normalization_gradient(int N, int K, int H, int W, float *INPUTS, float *OUTPUTS, float *D_INPUTS, float *D_OUTPUTS, float ALPHA, float BETA, int LOCAL_RADIUS);
 
-void interleave_block(int N, int C, int H, int W, int BLOCKSIZE, float *INPUT, float *OUTPUT);
-void uninterleave_block(int N, int C, int H, int W, int BLOCKSIZE, float *INPUT, float *OUTPUT);
+void interleave_block(int N, int C, int H, int W, int BLOCKSIZE, float *TENSOR, float *SCRATCH);
+void uninterleave_block(int N, int C, int H, int W, int BLOCKSIZE, float *TENSOR, float *SCRATCH);
+void uninterleave_block_int(int N, int C, int H, int W, int BLOCKSIZE, int *TENSOR, float *SCRATCH);
 
 void transpose_replace(int N, int C, float *INPUT, float *OUTPUT);
 
 void convolution_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH);
+
+void get_argmaxs(int N, int C, int H, int W, float *INPUTS, float *OUTPUTS, int *ARGMAXS);
 
 void convolution_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH);
 
