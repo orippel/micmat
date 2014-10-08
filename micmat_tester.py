@@ -21,26 +21,47 @@ def main():
 
     np.set_printoptions(precision = 4, suppress = True)
 
+    examine_convolution = False
+    examine_local = True
+
     time_and_dont_test = True
-    test_gradient = True
+    test_gradient = False
     offload = True
     
     if time_and_dont_test:
-        N_block = 16
-        K_block = 4
-        C_block = 4
+        if examine_convolution:
+            N_block = 16
+            K_block = 4
+            C_block = 4
 
-        N = 128
-        K = 64
-        c = 64
-        H = 13
-        W = 13
-        X = 5
-        Y = 5
-        stride = 1
-        padding = 0
-        pooling_radius = 3
-        pooling_stride = 2
+            N = 128
+            K = 64
+            c = 64
+            H = 13
+            W = 13
+            X = 5
+            Y = 5
+            stride = 1
+            padding = 0
+            pooling_radius = 3
+            pooling_stride = 2
+
+        elif examine_local:
+            N_block = 16
+            K_block = 4
+            C_block = 4
+
+            N = 128
+            K = 64
+            c = 64
+            H = 13
+            W = 13
+            X = 5
+            Y = 5
+            stride = 1
+            padding = 0
+            pooling_radius = 1
+            pooling_stride = 1
     
     else:
         N_block = 16
@@ -55,8 +76,8 @@ def main():
         Y = 3
         stride = 1
         padding = 2
-        pooling_radius = 3
-        pooling_stride = 2
+        pooling_radius = 1
+        pooling_stride = 1
 
 
     shadow = False
@@ -78,7 +99,11 @@ def main():
 
     C.check_mic_status()
 
-    test_convolution(time_and_dont_test, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block)
+    if examine_convolution:
+        test_convolution(time_and_dont_test, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block)
+
+    if examine_local:
+        test_local(time_and_dont_test, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block)
 
     # inputs = C.MICMat((N, K, H, W)).offload_mic().fill_zeros()
     # outputs = inputs.deepcopy()
@@ -137,8 +162,8 @@ def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooli
     print 'Modifying macros file. \n'
     output_H = (H + 2*padding - Y + 1)/stride
     output_W = (W + 2*padding - X + 1)/stride
-    pooled_H = (output_H - pooling_radius + 1)/pooling_stride
-    pooled_W = (output_W - pooling_radius + 1)/pooling_stride
+    pooled_H = int(np.ceil((output_H - pooling_radius + 1.)/pooling_stride))
+    pooled_W = int(np.ceil((output_W - pooling_radius + 1.)/pooling_stride))
     
     macros_file = open(SPECIFIC_MICMAT_PATH + 'generated_macros.h', 'w')
     
@@ -213,8 +238,8 @@ def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooli
 def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block):
     output_H = (H + 2*padding - Y + 1)/stride
     output_W = (W + 2*padding - X + 1)/stride
-    pooled_H = (output_H - pooling_radius + 1)/pooling_stride
-    pooled_W = (output_W - pooling_radius + 1)/pooling_stride
+    pooled_H = int(np.ceil((output_H - pooling_radius + 1.)/pooling_stride))
+    pooled_W = int(np.ceil((output_W - pooling_radius + 1.)/pooling_stride))
 
     K_preshadow = K
     if shadow:
@@ -222,7 +247,7 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
 
     num_operations = N*K*c*output_H*output_W*X*Y*2
     num_operations_argmax = N*K*c*pooled_H*pooled_W*Y*X*2
-    num_operations_gradient = N*K*c*pooled_H*pooled_W*Y*X*4
+    num_operations_gradient = N*K*c*pooled_H*pooled_W*Y*X*2
 
     inputs = C.MICMat((c, H, W, N))
     inputs.fill_zeros()
@@ -242,19 +267,17 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
         filters.fill_randn(stream, 0., 1.)
 
     print 'Computing convolution now.'
+
     # timer.tic()
-    inputs.interleave_block(scratch, N_block)
-    # outputs.interleave_block(scratch, N_block)
-    
-    filters.rotate_dimensions(scratch, 'forward')
-    filters.interleave_block(scratch, K_block)
+    inputs.interleave_block(N_block, scratch)
     # timer.elapsed()
 
-    # inputs_tmp = scratch.reset(inputs)
-    # inputs_tmp.shape = inputs.shape[1:] + (inputs.shape[0],)
     # timer.tic()
-    # inputs_tmp.rotate_dimensions(inputs, 'forward')
-    # inputs.rotate_dimensions(inputs_tmp, 'backward')
+    filters.rotate_dimensions('forward', scratch)
+    # timer.elapsed()
+
+    # timer.tic()
+    filters.interleave_block(K_block, scratch)
     # timer.elapsed()
 
     timer.tic()
@@ -262,12 +285,20 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
     # outputs.convolve_and_pool_replace(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, False, scratch, shadow)
     test_time = timer.toc()
 
-    inputs.uninterleave_block(scratch, N_block)
-    outputs.uninterleave_block(scratch, N_block)
-    argmaxs.uninterleave_block(scratch, N_block)
+    # timer.tic()
+    inputs.uninterleave_block(N_block, scratch)
+    # timer.elapsed()
 
-    filters.uninterleave_block(scratch, K_block)
-    filters.rotate_dimensions(scratch, 'backward')
+    # timer.tic()
+    outputs.uninterleave_block(N_block, scratch)
+    # timer.elapsed()
+
+    # timer.tic()
+    argmaxs.uninterleave_block(N_block, scratch)
+    # timer.elapsed()
+
+    filters.uninterleave_block(K_block, scratch)
+    filters.rotate_dimensions('backward', scratch)
     
     # print outputs
 
@@ -299,9 +330,9 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
                 for w in range(pooled_W):
                     for n in range(N):
                         h_start = h*pooling_stride
-                        h_end = h_start + pooling_radius
+                        h_end = min(h_start + pooling_radius, output_H)
                         w_start = w*pooling_stride
-                        w_end = w_start + pooling_radius
+                        w_end = min(w_start + pooling_radius, output_W)
                         pooled_outputs_np[k, h, w, n] = np.amax(outputs_np[k, h_start:h_end, w_start:w_end, n])
 
         difference = np.mean(np.abs(outputs.ndarray() - pooled_outputs_np))
@@ -342,19 +373,27 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
             print 'Speed: %f Gflops.' % (num_operations_gradient/convolution_gradient_time*1e-9)
 
 
-def test_local(time_and_dont_test, offload, N, K, c, H, W, X, Y, stride, padding, scratch):
+def test_local(time_and_dont_test, test_gradient, offload, N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block):
     output_H = (H + 2*padding - Y + 1)/stride
     output_W = (W + 2*padding - X + 1)/stride
+    pooled_H = int(np.ceil((output_H - pooling_radius + 1.)/pooling_stride))
+    pooled_W = int(np.ceil((output_W - pooling_radius + 1.)/pooling_stride))
+
+    K_preshadow = K
+    if shadow:
+        K *= 2
 
     num_operations = N*K*c*output_H*output_W*X*Y*2
-    num_operations_gradient = N*K*c*output_H*output_W*Y*X*4
+    num_operations_argmax = N*K*c*pooled_H*pooled_W*Y*X*2
+    num_operations_gradient = N*K*c*pooled_H*pooled_W*Y*X*2
 
-    inputs = C.MICMat((N, c, H, W))
+    inputs = C.MICMat((c, H, W, N))
     inputs.fill_zeros()
     
-    filters = C.MICMat((K, output_H, output_W, c, Y, X))
+    filters = C.MICMat((K_preshadow, output_H, output_W, c, Y, X))
     filters.fill_zeros()
-    outputs = C.MICMat((N, K, output_H, output_W))
+    outputs = C.MICMat((K, pooled_H, pooled_W, N))
+    argmaxs = outputs.deepcopy().offload_mic().astype('int')
     
     if offload:
         inputs.offload_mic()
@@ -365,47 +404,161 @@ def test_local(time_and_dont_test, offload, N, K, c, H, W, X, Y, stride, padding
         filters.offload_mic()
         filters.fill_randn(stream, 0., 1.)
 
-    print 'Computing local now.'
+    print 'Computing local filtering now.'
+
+    inputs.interleave_block(N_block, scratch)
+
+    filters.rotate_dimensions('forward', scratch)
+    filters.interleave_block(K_block, scratch)
+
     timer.tic()
-    outputs.local_replace(inputs, filters, stride, padding, 1, scratch)
+    outputs.local_filtering(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, False, scratch)
     test_time = timer.toc()
 
-    # print outputs
-    # outputs.fill_zeros()
+    inputs.uninterleave_block(N_block, scratch)
 
-    print '\n \n Local time: %f seconds.' % test_time
+    outputs.uninterleave_block(N_block, scratch)
+
+    argmaxs.uninterleave_block(N_block, scratch)
+
+    filters.uninterleave_block(K_block, scratch)
+    filters.rotate_dimensions('backward', scratch)
+    
+    print '\n \n Local filtering time: %f seconds.' % test_time
     print 'Speed: %f Gflops.' % (num_operations/test_time*1e-9)
 
+    # timer.tic()
+    # outputs.convolve_and_pool_replace(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, True, scratch, shadow)
+    # fixed_time = timer.toc()
+
+    # print outputs
+
     if not time_and_dont_test:
-        print 'Running convolution test. '
-        # pure_python = np.zeros((N, K, pooled_H, pooled_W)) - 1e10
-        # for n in range(N):
-        #     for k in range(K):
-        #         for h in range(H - Y + 1):
-        #             for w in range(W - X + 1):
-        #                 pure_python[n, k, h/pooling_stride, w/pooling_stride] = max(np.sum(np.multiply(inputs.ndarray()[n, :, h:h+Y, w:w+X], filters.ndarray()[k, :, :, :])), pure_python[n, k, h/pooling_stride, w/pooling_stride])
+        print 'Running local filtering test. '
+        inputs_np = np.lib.pad(inputs.ndarray(), ((0, 0), (padding, padding), (padding, padding), (0, 0)), 'constant', constant_values = (0, 0))
 
-        # difference = np.mean(np.abs(outputs.ndarray() - pure_python))
-        # if difference < 1.e-6:
-        #     print 'Convolution test passed. '
+        filters_np = filters.ndarray()
+        outputs_np = np.zeros((K, output_H, output_W, N)) - 1e10        
+        pooled_outputs_np = np.zeros((K, pooled_H, pooled_W, N))
 
-        # else:
-        #     print 'Convolution test failed with difference %f. ' % difference,
-        #     print outputs
-        #     print pure_python[0, 0, :, :]
+        for k in range(K):
+            for h in range(output_H):
+                for w in range(output_W):
+                    for n in range(N):
+                        outputs_np[k, h, w, n] = np.sum(np.multiply(inputs_np[:, h:h+Y, w:w+X, n], filters_np[k, h, w, :, :, :]))
+
+        for k in range(K):
+            for h in range(pooled_H):
+                for w in range(pooled_W):
+                    for n in range(N):
+                        h_start = h*pooling_stride
+                        h_end = min(h_start + pooling_radius, output_H)
+                        w_start = w*pooling_stride
+                        w_end = min(w_start + pooling_radius, output_W)
+                        pooled_outputs_np[k, h, w, n] = np.amax(outputs_np[k, h_start:h_end, w_start:w_end, n])
+
+        difference = np.mean(np.abs(outputs.ndarray() - pooled_outputs_np))
+        if difference < 1.e-6:
+            print 'Local filtering test passed. '
+
+        else:
+            print 'Local filtering test failed with difference %f. ' % difference
+            print (outputs.ndarray() - pooled_outputs_np)[0, 0, :, :]
+            print ''
+            
+            for k in range(K):
+                # for n in range(N):
+                    # print (k, n)
+                print outputs.ndarray()[k, :, :, n]
+                print ''
+                print pooled_outputs_np[k, :, :, n]
+                print ''
+                print (outputs.ndarray() - pooled_outputs_np)[k, :, :, n]
+                print ''
+
+            print outputs
+            print np.reshape(pooled_outputs_np[0, 0, :, :], pooled_outputs_np.shape[2:])
 
     else:
-        gradient_outputs = outputs.deepcopy()
-        gradient_filters = filters.deepcopy()
-        gradient_inputs = inputs.deepcopy()
+        if test_gradient:
+            gradient_pooled_outputs = outputs.deepcopy()
+            gradient_filters = filters.deepcopy()
+            gradient_inputs = inputs.deepcopy()
 
-        print 'Computing local gradient now.'
-        timer.tic()
-        gradient_filters.local_gradient(inputs, filters, gradient_outputs, gradient_inputs, stride, padding, 1, scratch)
-        local_gradient_time = timer.toc()
+            print 'Computing local filtering gradient now.'
+            timer.tic()
+            gradient_filters.convolution_gradient(inputs, filters, argmaxs,
+                gradient_pooled_outputs, gradient_inputs, stride, padding, pooling_radius, pooling_stride, 1, scratch)
+            convolution_gradient_time = timer.toc()
 
-        print '\n \n Time: %f seconds.' % local_gradient_time
-        print 'Speed: %f Gflops.' % (num_operations_gradient/local_gradient_time*1e-9)
+            print '\n \n Time: %f seconds.' % convolution_gradient_time
+            print 'Speed: %f Gflops.' % (num_operations_gradient/convolution_gradient_time*1e-9)
+
+
+# def test_local(time_and_dont_test, offload, N, K, c, H, W, X, Y, stride, padding, scratch):
+#     output_H = (H + 2*padding - Y + 1)/stride
+#     output_W = (W + 2*padding - X + 1)/stride
+
+#     num_operations = N*K*c*output_H*output_W*X*Y*2
+#     num_operations_gradient = N*K*c*output_H*output_W*Y*X*4
+
+#     inputs = C.MICMat((N, c, H, W))
+#     inputs.fill_zeros()
+    
+#     filters = C.MICMat((K, output_H, output_W, c, Y, X))
+#     filters.fill_zeros()
+#     outputs = C.MICMat((N, K, output_H, output_W))
+    
+#     if offload:
+#         inputs.offload_mic()
+#         inputs.fill_randn(stream, 0., 1.)
+
+#         outputs.offload_mic()
+        
+#         filters.offload_mic()
+#         filters.fill_randn(stream, 0., 1.)
+
+#     print 'Computing local now.'
+#     timer.tic()
+#     outputs.local_replace(inputs, filters, stride, padding, 1, scratch)
+#     test_time = timer.toc()
+
+#     # print outputs
+#     # outputs.fill_zeros()
+
+#     print '\n \n Local time: %f seconds.' % test_time
+#     print 'Speed: %f Gflops.' % (num_operations/test_time*1e-9)
+
+#     if not time_and_dont_test:
+#         print 'Running convolution test. '
+#         # pure_python = np.zeros((N, K, pooled_H, pooled_W)) - 1e10
+#         # for n in range(N):
+#         #     for k in range(K):
+#         #         for h in range(H - Y + 1):
+#         #             for w in range(W - X + 1):
+#         #                 pure_python[n, k, h/pooling_stride, w/pooling_stride] = max(np.sum(np.multiply(inputs.ndarray()[n, :, h:h+Y, w:w+X], filters.ndarray()[k, :, :, :])), pure_python[n, k, h/pooling_stride, w/pooling_stride])
+
+#         # difference = np.mean(np.abs(outputs.ndarray() - pure_python))
+#         # if difference < 1.e-6:
+#         #     print 'Convolution test passed. '
+
+#         # else:
+#         #     print 'Convolution test failed with difference %f. ' % difference,
+#         #     print outputs
+#         #     print pure_python[0, 0, :, :]
+
+#     else:
+#         gradient_outputs = outputs.deepcopy()
+#         gradient_filters = filters.deepcopy()
+#         gradient_inputs = inputs.deepcopy()
+
+#         print 'Computing local gradient now.'
+#         timer.tic()
+#         gradient_filters.local_gradient(inputs, filters, gradient_outputs, gradient_inputs, stride, padding, 1, scratch)
+#         local_gradient_time = timer.toc()
+
+#         print '\n \n Time: %f seconds.' % local_gradient_time
+#         print 'Speed: %f Gflops.' % (num_operations_gradient/local_gradient_time*1e-9)
 
 
 def test_update(time_and_dont_test, offload):

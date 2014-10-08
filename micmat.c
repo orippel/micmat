@@ -36,9 +36,12 @@
 #define md(a, b) ((a) - ((b)*((a)/(b))))
 #define mn(a, b) (((a) > (b)) ? (b) : (a))
 #define mx(a, b) (((a) > (b)) ? (a) : (b))
+#define ti2(a, b, B) ((a)*(B) + (b))
+#define ti3(a, b, c, B, C) ((a)*(B)*(C) + (b)*(C) + (c))
 #define ti(a, b, c, d, B, C, D) ((a)*(B)*(C)*(D) + (b)*(C)*(D) + (c)*(D) + (d))
 #define ti5(a, b, c, d, e, B, C, D, E) ((a)*(B)*(C)*(D)*(E) + (b)*(C)*(D)*(E) + (c)*(D)*(E) + (d)*(E) + (e))
 #define ti6(a, b, c, d, e, f, B, C, D, E, F) ((a)*(B)*(C)*(D)*(E)*(F) + (b)*(C)*(D)*(E)*(F) + (c)*(D)*(E)*(F) + (d)*(E)*(F) + (e)*(F) + (f))
+#define ti7(a, b, c, d, e, f, g, B, C, D, E, F, G) ((a)*(B)*(C)*(D)*(E)*(F)*(G) + (b)*(C)*(D)*(E)*(F)*(G) + (c)*(D)*(E)*(F)*(G) + (d)*(E)*(F)*(G) + (e)*(F)*(G) + (f)*(G) + (g))
 
 #define it(s, i, dim, B, C, D) do{ \
     if (dim == 0) s = i / (B*C*D); \
@@ -1176,27 +1179,46 @@ void update(int a1, int a2, int a3, int a4, int a5, int a6, float *A, int b1, in
     #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \
     in(A:length(0) REUSE) \
     in(B:length(0) REUSE)
-    {
-        int c123456, c1, c2, c3, c4, c5, c6, mod1, mod2, mod3, mod4, mod5, mod6;
-        #pragma omp parallel for private(c123456, c1, c2, c3, c4, c5, c6, mod1, mod2, mod3, mod4, mod5, mod6)
-        for (c123456 = 0; c123456 < a1*a2*a3*a4*a5*a6; c123456++){
-            c1 = c123456 / (a2*a3*a4*a5*a6);
-            c2 = (c123456 % (a2*a3*a4*a5*a6)) / (a3*a4*a5*a6);
-            c3 = (c123456 % (a3*a4*a5*a6)) / (a4*a5*a6);
-            c4 = (c123456 % (a4*a5*a6)) / (a5*a6);
-            c5 = (c123456 % (a5*a6)) / a6;
-            c6 = c123456 % a6;
+    {   
+        float (*restrict A_6D)[a2][a3][a4][a5][a6] = (float (*)[a2][a3][a4][a5][a6]) A;
+        float (*restrict B_6D)[b2][b3][b4][b5][b6] = (float (*)[b2][b3][b4][b5][b6]) B;
 
-            mod1 = (c1 < b1-1) ? c1 : b1-1;
-            mod2 = (c2 < b2-1) ? c2 : b2-1;
-            mod3 = (c3 < b3-1) ? c3 : b3-1;
-            mod4 = (c4 < b4-1) ? c4 : b4-1;
-            mod5 = (c5 < b5-1) ? c5 : b5-1;
-            mod6 = (c6 < b6-1) ? c6 : b6-1;
+        #pragma omp parallel for
+        for (int i1i2i3 = 0; i1i2i3 < a1*a2*a3; i1i2i3++){
+            int i1 = i1i2i3 / (a2*a3);
+            int i2 = md(i1i2i3, a2*a3) / a3;
+            int i3 = md(i1i2i3, a3);
 
-            // A[ti(c1, c2, c3, c4, a2, a3, a4)] += ALPHA * B[ti(mod1, mod2, mod3, mod4, b2, b3, b4)];
-            A[((((c1*a2 + c2)*a3 + c3)*a4 + c4)*a5 + c5)*a6 + c6] += ALPHA * B[((((mod1*b2 + mod2)*b3 + mod3)*b4 + mod4)*b5 + mod5)*b6 + mod6];
+            for (int i4 = 0; i4 < a4; i4++){
+                for (int i5 = 0; i5 < a5; i5++){
+                    for (int i6 = 0; i6 < a6; i6++){
+                        A_6D[i1][i2][i3][i4][i5][i6] += ALPHA * B_6D[mn(b1-1, i1)][mn(b2-1, i2)][mn(b3-1, i3)][mn(b4-1, i4)][mn(b5-1, i5)][mn(b6-1, i6)];
+                    }
+                }
+            }
         }
+        // A_6D[1:a1][1:a2][1:a3][1:a4][1:a5][1:a6] += B_6D[1:b1][1:b2][1:b3][1:b4][1:b5][1:b6];
+        
+        // int c123456, c1, c2, c3, c4, c5, c6, mod1, mod2, mod3, mod4, mod5, mod6;
+        // #pragma omp parallel for private(c123456, c1, c2, c3, c4, c5, c6, mod1, mod2, mod3, mod4, mod5, mod6)
+        // for (c123456 = 0; c123456 < a1*a2*a3*a4*a5*a6; c123456++){
+        //     c1 = c123456 / (a2*a3*a4*a5*a6);
+        //     c2 = (c123456 % (a2*a3*a4*a5*a6)) / (a3*a4*a5*a6);
+        //     c3 = (c123456 % (a3*a4*a5*a6)) / (a4*a5*a6);
+        //     c4 = (c123456 % (a4*a5*a6)) / (a5*a6);
+        //     c5 = (c123456 % (a5*a6)) / a6;
+        //     c6 = c123456 % a6;
+
+        //     mod1 = (c1 < b1-1) ? c1 : b1-1;
+        //     mod2 = (c2 < b2-1) ? c2 : b2-1;
+        //     mod3 = (c3 < b3-1) ? c3 : b3-1;
+        //     mod4 = (c4 < b4-1) ? c4 : b4-1;
+        //     mod5 = (c5 < b5-1) ? c5 : b5-1;
+        //     mod6 = (c6 < b6-1) ? c6 : b6-1;
+
+        //     // A[ti(c1, c2, c3, c4, a2, a3, a4)] += ALPHA * B[ti(mod1, mod2, mod3, mod4, b2, b3, b4)];
+        //     A[((((c1*a2 + c2)*a3 + c3)*a4 + c4)*a5 + c5)*a6 + c6] += ALPHA * B[((((mod1*b2 + mod2)*b3 + mod3)*b4 + mod4)*b5 + mod5)*b6 + mod6];
+        // }
 
     }
 }
@@ -2637,8 +2659,8 @@ int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int 
     assert(Y == Y_const);
     assert(output_H_const == (H_const + 2*padding_const - Y_const + 1)/stride_const);
     assert(output_W_const == (W_const + 2*padding_const - X_const + 1)/stride_const);
-    assert(pooled_H_const == (output_H_const - pooling_radius_const + 1)/pooling_stride_const);
-    assert(pooled_W_const == (output_W_const - pooling_radius_const + 1)/pooling_stride_const);
+    assert(pooled_H_const == ceil((output_H_const - pooling_radius_const + 1.f)/pooling_stride_const));
+    assert(pooled_W_const == ceil((output_W_const - pooling_radius_const + 1.f)/pooling_stride_const));
 
     #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \ 
     in(INPUTS:length(0) REUSE) \ 
@@ -2708,16 +2730,20 @@ int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int 
 
                     int h_output = h*pooling_stride_const;
                     int w_output = w*pooling_stride_const;
-                    
+
+                    int window_width = pooling_radius_const - mx(w_output + pooling_radius_const - output_W_const, 0);
+                    int window_height = pooling_radius_const - mx(h_output + pooling_radius_const - output_H_const, 0);
+
                     for (int kk = 0; kk < K_BLOCK; kk++){
                         float *restrict outputs_pointer = SCRATCH + ti5(omp_get_thread_num(), h_output, w_output, kk, 0, output_H_const, output_W_const, K_BLOCK, N_BLOCK);
                         int *restrict argmaxs_pointer = ARGMAXS + ti5(n_block, k + kk, h, w, 0, K_const, pooled_H_const, pooled_W_const, N_BLOCK);
                         float *restrict pooled_outputs_pointer = OUTPUTS + ti5(n_block, k + kk, h, w, 0, K_const, pooled_H_const, pooled_W_const, N_BLOCK);
+                        
                         pooled_outputs_pointer[0 : N_BLOCK] = -1.0e6;
 
                         int outputs_index = h_output*output_W_const + w_output;
-                        for (y = 0; y < pooling_radius_const; y++){
-                            for (x = 0; x < pooling_radius_const; x++){
+                        for (y = 0; y < window_height; y++){
+                            for (x = 0; x < window_width; x++){
                                 if (outputs_pointer[0 : N_BLOCK] > pooled_outputs_pointer[0 : N_BLOCK]){
                                     pooled_outputs_pointer[0 : N_BLOCK] = outputs_pointer[0 : N_BLOCK];
                                     argmaxs_pointer[0 : N_BLOCK] = outputs_index;
@@ -2725,8 +2751,8 @@ int *convolution_layer1(int N, int C, int H, int W, float *restrict INPUTS, int 
                                 outputs_index++;
                                 outputs_pointer += K_BLOCK*N_BLOCK;
                             }
-                            outputs_index += output_W_const - pooling_radius_const;
-                            outputs_pointer += (output_W_const - pooling_radius_const)*K_BLOCK*N_BLOCK;
+                            outputs_index += output_W_const - window_width;
+                            outputs_pointer += (output_W_const - window_width)*K_BLOCK*N_BLOCK;
                         }
                     }
 
@@ -2765,6 +2791,52 @@ void get_argmaxs(int N, int C, int H, int W, float *restrict INPUTS, float *rest
     } // pragma offload
 }
 
+void permute_dimensions(int D1, int D2, int D3, int D4, int perm1, int perm2, int perm3, int perm4, float *restrict TENSOR, float *restrict SCRATCH){
+
+    #pragma offload target(mic:MIC_DEV) \ 
+        in(TENSOR:length(0) REUSE) \
+        in(SCRATCH:length(0) REUSE)
+    {   
+        int i1, i2, i3, i4;
+        SCRATCH[0 : D1*D2*D3*D4] = TENSOR[0 : D1*D2*D3*D4];
+
+        int dimensions[4] = {D1, D2, D3, D4};
+        int P1 = dimensions[perm1];
+        int P2 = dimensions[perm2];
+        int P3 = dimensions[perm3];
+        int P4 = dimensions[perm4];
+
+        // printf("(%d, %d, %d, %d)\n (%d, %d, %d, %d)\n", D1, D2, D3, D4, P1, P2, P3, P4);
+
+        #pragma omp parallel for \
+            schedule(dynamic) \
+            default(none) \
+            private(i1, i2, i3, i4) \
+            shared(TENSOR, SCRATCH, D1, D2, D3, D4, P1, P2, P3, P4, perm1, perm2, perm3, perm4)
+
+        for (int i1i2 = 0; i1i2 < D1*D2; i1i2++){
+            i1 = i1i2 / D2;
+            i2 = md(i1i2, D2);
+
+            int indices[4];
+            for (i3 = 0; i3 < D3; i3++){
+                for (i4 = 0; i4 < D4; i4++){
+                    indices[0] = i1;
+                    indices[1] = i2;
+                    indices[2] = i3;
+                    indices[3] = i4;
+                    int p1 = indices[perm1];
+                    int p2 = indices[perm2];
+                    int p3 = indices[perm3];
+                    int p4 = indices[perm4];
+                    TENSOR[ti(p1, p2, p3, p4, P2, P3, P4)] = SCRATCH[ti(i1, i2, i3, i4, D2, D3, D4)];
+                }
+            }
+        }
+
+    } // pragma offload
+}
+
 void transpose_replace(int N, int C, float *restrict TENSOR, float *restrict SCRATCH){
 
     #pragma offload target(mic:MIC_DEV) \ 
@@ -2789,92 +2861,136 @@ void transpose_replace(int N, int C, float *restrict TENSOR, float *restrict SCR
     } // pragma offload
 }
 
-void interleave_block(int N, int C, int H, int W, int BLOCKSIZE, float *restrict TENSOR, float *restrict SCRATCH){
+void transpose_replace_int(int N, int C, int *restrict TENSOR, float *restrict SCRATCH){
 
     #pragma offload target(mic:MIC_DEV) \ 
         in(TENSOR:length(0) REUSE) \
         in(SCRATCH:length(0) REUSE)
-    {
-        int n_block, n, c, h, w;
+    {   
         
-        SCRATCH[0 : N*C*H*W] = TENSOR[0 : N*C*H*W];
+        // mkl_somatcopy('R', 'T', N, C, 1.0, TENSOR, C, SCRATCH, N);
+        int n, c;
+        SCRATCH[0 : N*C] = (float) TENSOR[0 : N*C];
 
         #pragma omp parallel for \
             schedule(dynamic) \
             default(none) \
-            private(n_block, n, c, h, w) \
-            shared(N, TENSOR, SCRATCH, C, H, W, BLOCKSIZE)
+            private(n, c) \
+            shared(N, TENSOR, SCRATCH, C)
 
-        for (int nc = 0; nc < N/BLOCKSIZE*C; nc++){
-            n_block = nc / C;
-            n = n_block*BLOCKSIZE;
-            c = md(nc, C);
-            
-            for (h = 0; h < H; h++){ 
-                for (w = 0; w < W; w++){
-                    TENSOR[ti5(n_block, c, h, w, 0, C, H, W, BLOCKSIZE) : BLOCKSIZE] = SCRATCH[ti(c, h, w, n, H, W, N) : BLOCKSIZE];
-                } // w
-            } // h
-        } // nc
+        for (int c = 0; c < C; c++){
+            TENSOR[c*N : N] = (int) SCRATCH[c : N : C];
+        }            
+
     } // pragma offload
 }
 
-void uninterleave_block(int N, int C, int H, int W, int BLOCKSIZE, float *restrict TENSOR, float *restrict SCRATCH){
+void interleave_block(const int N, const int C, const int BLOCKSIZE, float *restrict TENSOR, float *restrict SCRATCH){
 
     #pragma offload target(mic:MIC_DEV) \ 
         in(TENSOR:length(0) REUSE) \
         in(SCRATCH:length(0) REUSE)
     {
-        int n_block, n, c, h, w;
-
-        SCRATCH[0 : N*C*H*W] = TENSOR[0 : N*C*H*W];
+        int n_block, n, c;
+        
+        SCRATCH[0 : N*C] = TENSOR[0 : N*C];
 
         #pragma omp parallel for \
             schedule(dynamic) \
             default(none) \
-            private(n_block, n, c, h, w) \
-            shared(N, TENSOR, SCRATCH, C, H, W, BLOCKSIZE)
+            private(n_block, n, c) \
+            shared(N, TENSOR, SCRATCH, C, BLOCKSIZE)
 
         for (int nc = 0; nc < N/BLOCKSIZE*C; nc++){
             n_block = nc / C;
             n = n_block*BLOCKSIZE;
             c = md(nc, C);
             
-            for (h = 0; h < H; h++){ 
-                for (w = 0; w < W; w++){
-                    TENSOR[ti(c, h, w, n, H, W, N) : BLOCKSIZE] = SCRATCH[ti5(n_block, c, h, w, 0, C, H, W, BLOCKSIZE) : BLOCKSIZE];
-                } // w
-            } // h
+            float *restrict tensor_pointer = TENSOR + ti3(n_block, c, 0, C, BLOCKSIZE);
+            float *restrict scratch_pointer = SCRATCH + ti2(c, n, N);
+
+            tensor_pointer[0 : BLOCKSIZE] = scratch_pointer[0 : BLOCKSIZE];
         } // nc
     } // pragma offload
 }
 
-void uninterleave_block_int(int N, int C, int H, int W, int BLOCKSIZE, int *restrict TENSOR, float *restrict SCRATCH){
+void interleave_block_int(const int N, const int C, const int BLOCKSIZE, int *restrict TENSOR, float *restrict SCRATCH){
 
     #pragma offload target(mic:MIC_DEV) \ 
         in(TENSOR:length(0) REUSE) \
         in(SCRATCH:length(0) REUSE)
     {
-        int n_block, n, c, h, w;
-
-        SCRATCH[0 : N*C*H*W] = (float) TENSOR[0 : N*C*H*W];
+        int n_block, n, c;
+        
+        SCRATCH[0 : N*C] = (float) TENSOR[0 : N*C];
 
         #pragma omp parallel for \
             schedule(dynamic) \
             default(none) \
-            private(n_block, n, c, h, w) \
-            shared(N, TENSOR, SCRATCH, C, H, W, BLOCKSIZE)
+            private(n_block, n, c) \
+            shared(N, TENSOR, SCRATCH, C, BLOCKSIZE)
 
         for (int nc = 0; nc < N/BLOCKSIZE*C; nc++){
             n_block = nc / C;
             n = n_block*BLOCKSIZE;
             c = md(nc, C);
             
-            for (h = 0; h < H; h++){ 
-                for (w = 0; w < W; w++){
-                    TENSOR[ti(c, h, w, n, H, W, N) : BLOCKSIZE] = (int) SCRATCH[ti5(n_block, c, h, w, 0, C, H, W, BLOCKSIZE) : BLOCKSIZE];
-                } // w
-            } // h
+            int *restrict tensor_pointer = TENSOR + ti3(n_block, c, 0, C, BLOCKSIZE);
+            float *restrict scratch_pointer = SCRATCH + ti2(c, n, N);
+
+            tensor_pointer[0 : BLOCKSIZE] = (int) scratch_pointer[0 : BLOCKSIZE];
+        } // nc
+    } // pragma offload
+}
+
+void uninterleave_block(const int N, const int C, const int BLOCKSIZE, float *restrict TENSOR, float *restrict SCRATCH){
+
+    #pragma offload target(mic:MIC_DEV) \ 
+        in(TENSOR:length(0) REUSE) \
+        in(SCRATCH:length(0) REUSE)
+    {
+        int n_block, n, c;
+        
+        SCRATCH[0 : N*C] = TENSOR[0 : N*C];
+
+        #pragma omp parallel for \
+            schedule(dynamic) \
+            default(none) \
+            private(n_block, n, c) \
+            shared(N, TENSOR, SCRATCH, C, BLOCKSIZE)
+
+        for (int nc = 0; nc < N/BLOCKSIZE*C; nc++){
+            n_block = nc / C;
+            n = n_block*BLOCKSIZE;
+            c = md(nc, C);
+
+            TENSOR[ti2(c, n, N) : BLOCKSIZE] = SCRATCH[ti3(n_block, c, 0, C, BLOCKSIZE) : BLOCKSIZE];
+        } // nc
+    } // pragma offload
+}
+
+void uninterleave_block_int(const int N, const int C, const int BLOCKSIZE, int *restrict TENSOR, float *restrict SCRATCH){
+
+    #pragma offload target(mic:MIC_DEV) \ 
+        in(TENSOR:length(0) REUSE) \
+        in(SCRATCH:length(0) REUSE)
+    {
+        int n_block, n, c;
+        
+        SCRATCH[0 : N*C] = (float) TENSOR[0 : N*C];
+
+        #pragma omp parallel for \
+            schedule(dynamic) \
+            default(none) \
+            private(n_block, n, c) \
+            shared(N, TENSOR, SCRATCH, C, BLOCKSIZE)
+
+        for (int nc = 0; nc < N/BLOCKSIZE*C; nc++){
+            n_block = nc / C;
+            n = n_block*BLOCKSIZE;
+            c = md(nc, C);
+            
+            TENSOR[ti2(c, n, N) : BLOCKSIZE] = (int) SCRATCH[ti3(n_block, c, 0, C, BLOCKSIZE) : BLOCKSIZE];
         } // nc
     } // pragma offload
 }
@@ -3262,26 +3378,21 @@ void convolution_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int 
                 h_arg = lin_index/output_W_const;
                 w_arg = lin_index - h_arg*output_W_const;
 
-                // if ((w_arg - padding_const >= 0) &&
-                //     (h_arg - padding_const >= 0) &&
-                //     (output_W_const - 1 - w_arg >= padding_const) &&
-                //     (output_H_const - 1 - h_arg >= padding_const)){
-                    
-                    // float *restrict inputs_pointer = INPUTS + ti(n, h_arg - padding_const, w_arg - padding_const, 0, H_const, W_const, C_const);
-                    float *restrict inputs_pointer = INPUTS + ti(n, mx(mn(h_arg-padding_const, H_const-1), 0), mx(mn(w_arg-padding_const, W_const-1), 0), 0, H_const, W_const, C_const);
+                // float *restrict inputs_pointer = INPUTS + ti(n, h_arg - padding_const, w_arg - padding_const, 0, H_const, W_const, C_const);
+                float *restrict inputs_pointer = INPUTS + ti(n, mx(mn(h_arg-padding_const, H_const-1), 0), mx(mn(w_arg-padding_const, W_const-1), 0), 0, H_const, W_const, C_const);
 
-                    const int x_invalid_left = mx(padding_const - w_arg, 0);
-                    const int x_invalid_right = mx(w_arg - padding_const + X_const - W_const, 0);
-                    const int x_len = X_const - x_invalid_left - x_invalid_right;
+                const int x_invalid_left = mx(padding_const - w_arg, 0);
+                const int x_invalid_right = mx(w_arg - padding_const + X_const - W_const, 0);
+                const int x_len = X_const - x_invalid_left - x_invalid_right;
 
-                    for (y = 0; y < Y_const; ++y){
-                        if ((y + h_arg - padding_const >= 0) && (y + h_arg - padding_const < H_const)){
-                                d_filters_pointer[x_invalid_left*C_const : x_len*C_const] += inputs_pointer[0 : x_len*C_const] * (*d_pooled_outputs_pointer);
-                                
-                                d_filters_pointer += X_const*C_const;
-                                inputs_pointer += W_const*C_const;
-                        } // if
-                    } // y
+                for (y = 0; y < Y_const; ++y){
+                    if ((y + h_arg - padding_const >= 0) && (y + h_arg - padding_const < H_const)){
+                            d_filters_pointer[x_invalid_left*C_const : x_len*C_const] += inputs_pointer[0 : x_len*C_const] * (*d_pooled_outputs_pointer);
+                            
+                            d_filters_pointer += X_const*C_const;
+                            inputs_pointer += W_const*C_const;
+                    } // if
+                } // y
             
             d_filters_pointer = D_FILTERS + k*Y_const*X_const*C_const;
             d_filters_pointer[0 : Y_const*X_const*C_const] += d_filters_tmp[0 : Y_const*X_const*C_const];
@@ -3289,6 +3400,125 @@ void convolution_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int 
             } // n
         } // khw
     } // pragma offload
+}
+
+// local filtering after interleaving N and K and blocking C, before intrinsics
+int *local_filtering_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
+
+    assert(C == C_const);
+    assert(H == H_const);
+    assert(W == W_const);
+    assert(K == K_const);
+    assert(stride == stride_const);
+    assert(padding == padding_const);
+    assert(pooling_radius == pooling_radius_const);
+    assert(pooling_stride == pooling_stride_const);
+    assert(X == X_const);
+    assert(Y == Y_const);
+    assert(output_H_const == (H_const + 2*padding_const - Y_const + 1)/stride_const);
+    assert(output_W_const == (W_const + 2*padding_const - X_const + 1)/stride_const);
+    assert(pooled_H_const == ceil((output_H_const - pooling_radius_const + 1.f)/pooling_stride_const));
+    assert(pooled_W_const == ceil((output_W_const - pooling_radius_const + 1.f)/pooling_stride_const));
+
+    #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(FILTERS:length(0) REUSE) \ 
+    in(OUTPUTS:length(0) REUSE) \
+    in(ARGMAXS:length(0) REUSE) \
+    in(SCRATCH:length(0) REUSE)
+    {
+        int n_block, n, k_block, k, i, j, h, w, c, c_block, y, x;
+        int nk, hw, ij, nkhw;
+
+        int XWN = (-X_const + W_const)*N,
+            HYWN = (H_const-Y_const)*W_const*N;        
+
+        #pragma omp parallel for \
+            schedule(dynamic) \
+            default(none) \
+            private(nk, hw, ij, n_block, n, k, k_block, h, w, c, c_block, y, x, i, j) \
+            shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XWN, HYWN)
+        
+        // ~=~=~=~=~=~=~=~= CONVOLUTION ~=~=~=~=~=~=~=~= 
+        for (nk = 0; nk < N/N_BLOCK*K_const/K_BLOCK; nk++){
+            
+            n_block = nk / (K_const/K_BLOCK);
+            n = n_block*N_BLOCK;
+            k_block = md(nk, K_const/K_BLOCK);
+            k = k_block*K_BLOCK;
+
+            SCRATCH[omp_get_thread_num()*output_H_const*output_W_const*N_BLOCK*K_BLOCK : output_H_const*output_W_const*N_BLOCK*K_BLOCK] = 0.f;
+
+            for (c_block = 0; c_block < C_const/C_BLOCK; c_block++){
+                c = c_block*C_BLOCK;
+
+                for (h = 0; h < output_H_const; h++){
+                    for (w = 0; w < output_W_const; w++){
+
+                        float *restrict convolutions = SCRATCH + ti5(omp_get_thread_num(), h, w, 0, 0, output_H_const, output_W_const, K_BLOCK, N_BLOCK);
+                              
+                        for (y = 0; y < Y_const; ++y){                                
+                            for (x = 0; x < X_const; ++x){
+                                
+                                if ((h + y - padding_const >= 0) && (h + y - padding_const < H_const) && (w + x - padding_const >= 0) && (w + x - padding_const < W_const)){
+                                    float *restrict filters_pointer = FILTERS + ti7(k_block, h, w, c, y, x, 0, output_H_const, output_W_const, C_const, Y_const, X_const, K_BLOCK);
+                                    float *restrict inputs_pointer = INPUTS + ti5(n_block, c, h + y - padding_const, w + x - padding_const, 0, C_const, H_const, W_const, N_BLOCK);
+
+                                    for (int cc = 0; cc < C_BLOCK; cc++){
+                                        for (int kk = 0; kk < K_BLOCK; kk++){
+                                            convolutions[kk*N_BLOCK : N_BLOCK] += inputs_pointer[0 : N_BLOCK] * (*filters_pointer);
+                                            filters_pointer++;
+                                        } //kk
+
+                                        filters_pointer += Y_const*X_const*K_BLOCK - K_BLOCK;
+                                        inputs_pointer += H_const*W_const*N_BLOCK;
+                                    } // cc
+                                } // if
+
+                            } // x
+                        } // y
+                    } // w
+                } // h
+            } // c_block
+
+
+            // ~=~=~=~=~=~=~=~= POOLING ~=~=~=~=~=~=~=~= 
+            for (h = 0; h < pooled_H_const; h++){
+                for (w = 0; w < pooled_W_const; w++){
+
+                    int h_output = h*pooling_stride_const;
+                    int w_output = w*pooling_stride_const;
+
+                    int window_width = pooling_radius_const - mx(w_output + pooling_radius_const - output_W_const, 0);
+                    int window_height = pooling_radius_const - mx(h_output + pooling_radius_const - output_H_const, 0);
+
+                    for (int kk = 0; kk < K_BLOCK; kk++){
+                        float *restrict outputs_pointer = SCRATCH + ti5(omp_get_thread_num(), h_output, w_output, kk, 0, output_H_const, output_W_const, K_BLOCK, N_BLOCK);
+                        int *restrict argmaxs_pointer = ARGMAXS + ti5(n_block, k + kk, h, w, 0, K_const, pooled_H_const, pooled_W_const, N_BLOCK);
+                        float *restrict pooled_outputs_pointer = OUTPUTS + ti5(n_block, k + kk, h, w, 0, K_const, pooled_H_const, pooled_W_const, N_BLOCK);
+                        
+                        pooled_outputs_pointer[0 : N_BLOCK] = -1.0e6;
+
+                        int outputs_index = h_output*output_W_const + w_output;
+                        for (y = 0; y < window_height; y++){
+                            for (x = 0; x < window_width; x++){
+                                if (outputs_pointer[0 : N_BLOCK] > pooled_outputs_pointer[0 : N_BLOCK]){
+                                    pooled_outputs_pointer[0 : N_BLOCK] = outputs_pointer[0 : N_BLOCK];
+                                    argmaxs_pointer[0 : N_BLOCK] = outputs_index;
+                                }
+                                outputs_index++;
+                                outputs_pointer += K_BLOCK*N_BLOCK;
+                            }
+                            outputs_index += output_W_const - window_width;
+                            outputs_pointer += (output_W_const - window_width)*K_BLOCK*N_BLOCK;
+                        }
+                    }
+
+                }
+            }
+        } //nk
+
+    } // pragma_offload
 }
 
 // int *convolve_and_pool_layer1(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded){

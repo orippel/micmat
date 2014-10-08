@@ -553,14 +553,22 @@ cdef class MICMat:
         return S
 
     def ndarray(self):
-        cdef np.ndarray[np.float32_t, ndim = 4] S = np.zeros(self.shape, dtype = np.float32)
+        
+        cdef np.ndarray[np.float32_t, ndim = 4] S4
+        cdef np.ndarray[np.float32_t, ndim = 6] S6
 
         if self.offloaded:
             self.pull_mic()
-        
-        S.data = <char *> cmicmat.unalign_host(self.size, self.A)
-        
-        return S
+
+        if self.ndim == 4:
+            S4 = np.zeros(self.shape, dtype = np.float32)
+            S4.data = <char *> cmicmat.unalign_host(self.size, self.A)
+            return S4
+
+        elif self.ndim == 6:
+            S6 = np.zeros(self.shape, dtype = np.float32)
+            S6.data = <char *> cmicmat.unalign_host(self.size, self.A)
+            return S6
 
     def float(self):
         assert self.size == 1, 'MICMat size must be 1 to convert to float.'
@@ -655,18 +663,38 @@ cdef class MICMat:
         C, H, W, N = self.shape
         cmicmat.get_argmaxs(N, C, H, W, inputs.A, self.A, argmaxs.A_int)
 
-    def interleave_block(self, MICMat scratch, int block):
-        C, H, W, N = self.shape
-        cmicmat.interleave_block(N, C, H, W, block, self.A, scratch.A)
+    def permute_dimensions(self, dimensions, MICMat scratch):
+        D1, D2, D3, D4 = self.shape
+        perm1, perm2, perm3, perm4 = dimensions
+        cmicmat.permute_dimensions(D1, D2, D3, D4, perm1, perm2, perm3, perm4, self.A, scratch.A)
 
-    def uninterleave_block(self, MICMat scratch, int block):
-        C, H, W, N = self.shape
+        self.shape = tuple([self.shape[p] for p in dimensions])
 
+        return self
+
+    def interleave_block(self, int block, MICMat scratch):
+        N = self.shape[-1]
+        C = np.product(self.shape[0:-1])
+        
         if self.dtype == 0:
-            cmicmat.uninterleave_block(N, C, H, W, block, self.A, scratch.A)
+            cmicmat.interleave_block(N, C, block, self.A, scratch.A)
 
         elif self.dtype == 1:
-            cmicmat.uninterleave_block_int(N, C, H, W, block, self.A_int, scratch.A)            
+            cmicmat.interleave_block_int(N, C, block, self.A_int, scratch.A)      
+
+        return self
+
+    def uninterleave_block(self, int block, MICMat scratch):
+        N = self.shape[-1]
+        C = np.product(self.shape[0:-1])
+
+        if self.dtype == 0:
+            cmicmat.uninterleave_block(N, C, block, self.A, scratch.A)
+
+        elif self.dtype == 1:
+            cmicmat.uninterleave_block_int(N, C, block, self.A_int, scratch.A)      
+
+        return self      
 
     def convolution(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch):
         # asserts that check number of dimensions, sizes, etc
@@ -677,8 +705,8 @@ cdef class MICMat:
 
         output_H = (H + 2*padding - Y + 1)/stride
         output_W = (W + 2*padding - X + 1)/stride
-        pooled_H = (output_H - pooling_radius + 1)/pooling_stride
-        pooled_W = (output_W - pooling_radius + 1)/pooling_stride
+        pooled_H = int(np.ceil((output_H - pooling_radius + 1.)/pooling_stride))
+        pooled_W = int(np.ceil((output_W - pooling_radius + 1.)/pooling_stride))
         
         # assert self.shape == (K, pooled_H, pooled_W, N), 'Output shape is ' + `self.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
         # assert argmaxs.shape == (K, pooled_H, pooled_W, N), 'Argmax shape is ' + `self.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
@@ -701,19 +729,21 @@ cdef class MICMat:
 
     def convolution_gradient(self, MICMat inputs, MICMat filters, MICMat argmaxs,
         MICMat gradient_pooled_outputs, MICMat gradient_inputs, 
-        int stride, int padding, int pooling_radius, int pooling_stride, layer, MICMat scratch):
+        int stride, int padding, int pooling_radius, int pooling_stride, 
+        int layer, MICMat scratch):
         # self is the filters gradient
+
         C, H, W, N = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
         K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
 
         output_H = (H + 2*padding - Y + 1)/stride
         output_W = (W + 2*padding - X + 1)/stride
-        pooled_H = (output_H - pooling_radius + 1)/pooling_stride
-        pooled_W = (output_W - pooling_radius + 1)/pooling_stride
+        pooled_H = int(np.ceil((output_H - pooling_radius + 1.)/pooling_stride))
+        pooled_W = int(np.ceil((output_W - pooling_radius + 1.)/pooling_stride))
         
-        assert self.shape == filters.shape, 'Filter shape is ' + self.shape + ' rather than ' + `filters.shape` + '.'
-        assert gradient_inputs.shape == inputs.shape, 'gradient_inputs shape is ' + gradient_inputs.shape + ' rather than ' + `inputs.shape` + '.'
-        assert gradient_pooled_outputs.shape == (K, pooled_H, pooled_W, N), 'gradient_pooled_outputs shape is ' + `gradient_pooled_outputs.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
+        #assert self.shape == filters.shape, 'Filter shape is ' + self.shape + ' rather than ' + `filters.shape` + '.'
+        #assert gradient_inputs.shape == inputs.shape, 'gradient_inputs shape is ' + gradient_inputs.shape + ' rather than ' + `inputs.shape` + '.'
+        #assert gradient_pooled_outputs.shape == (K, pooled_H, pooled_W, N), 'gradient_pooled_outputs shape is ' + `gradient_pooled_outputs.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
         
         if layer == 1:
             cmicmat.convolution_gradient_layer1(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
@@ -759,6 +789,38 @@ cdef class MICMat:
 
             #else:
                 #cmicmat.convolve_argmaxs_fixed_layer2(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded)
+
+    def local_filtering(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch):
+        # asserts that check number of dimensions, sizes, etc
+
+        C, H, W, N = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
+        # K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
+        _, _, _, Y, X, K = filters.shape
+
+        output_H = (H + 2*padding - Y + 1)/stride
+        output_W = (W + 2*padding - X + 1)/stride
+        pooled_H = int(np.ceil((output_H - pooling_radius + 1.)/pooling_stride))
+        pooled_W = int(np.ceil((output_W - pooling_radius + 1.)/pooling_stride))
+        
+        # assert self.shape == (K, pooled_H, pooled_W, N), 'Output shape is ' + `self.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
+        # assert argmaxs.shape == (K, pooled_H, pooled_W, N), 'Argmax shape is ' + `self.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
+
+        times = time.time()
+        if layer == 1:
+            start_time = time.time()
+            #if not argmaxs_fixed:
+            cmicmat.local_filtering_layer1(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
+
+            #else:
+                #cmicmat.convolve_argmaxs_fixed_layer1(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded)
+        
+        # elif layer == 2:
+            #if not argmaxs_fixed:
+            # cmicmat.local_filtering_layer2(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
+
+            #else:
+                #cmicmat.convolve_argmaxs_fixed_layer2(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded)
+
 
     def local_replace(self, MICMat inputs, MICMat filters, int stride, int padding, layer, MICMat scratch):
         # asserts that check number of dimensions, sizes, etc
@@ -890,7 +952,7 @@ cdef class MICMat:
 
         return self
 
-    def rotate_dimensions(self, MICMat scratch, direction):
+    def rotate_dimensions(self, direction, MICMat scratch):
         if direction == 'forward':
             rows = self.shape[0]
             cols = np.product(self.shape[1:])
@@ -901,7 +963,11 @@ cdef class MICMat:
             cols = self.shape[-1]
             self.shape = (self.shape[-1],) + self.shape[0:-1]
 
-        cmicmat.transpose_replace(rows, cols, self.A, scratch.A)
+        if self.dtype == 0:
+            cmicmat.transpose_replace(rows, cols, self.A, scratch.A)
+
+        elif self.dtype == 1:
+            cmicmat.transpose_replace_int(rows, cols, self.A_int, scratch.A)
 
         return self
 
