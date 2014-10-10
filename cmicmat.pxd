@@ -185,6 +185,7 @@ cdef extern from "micmat.h":
     void transpose_replace_int(int N, int C, int *INPUT, float *OUTPUT)
     
     void convolution_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH)
+    void convolution_layer2(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH)
 
     void get_argmaxs(int N, int C, int H, int W, float *INPUTS, float *OUTPUTS, int *ARGMAXS)
 

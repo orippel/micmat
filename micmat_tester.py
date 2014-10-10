@@ -21,20 +21,20 @@ def main():
 
     np.set_printoptions(precision = 4, suppress = True)
 
-    examine_convolution = False
-    examine_local = True
+    examine_convolution = True
+    examine_local = False
 
     time_and_dont_test = True
-    test_gradient = False
+    test_gradient = True
     offload = True
     
     if time_and_dont_test:
         if examine_convolution:
             N_block = 16
             K_block = 4
-            C_block = 4
+            C_block = 1
 
-            N = 128
+            N = 236 # faster if N is a multiple of 236 (stems from needing N/N_block*K/K_block to be divisible by 236)
             K = 64
             c = 64
             H = 13

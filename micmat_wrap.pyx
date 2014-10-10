@@ -17,6 +17,9 @@ import time
 cdef long memory_used_host = 0
 cdef long memory_used_mic = 0
 
+stream = None
+scratch = None
+
 def get_memory_used_host():
     global memory_used_host
     return memory_used_host
@@ -31,6 +34,16 @@ cdef class RandGen:
     def __cinit__(self):
         self.skip_num = 0
 
+
+def set_stream():
+    global stream
+    stream = RandGen()
+
+def set_scratch(size):
+    global scratch
+    scratch = Scratch((size, 1))
+    scratch.offload_mic()
+    scratch.fill_zeros()
 
 cdef class MICMat:
     #cdef int ROWS, COLS
@@ -711,21 +724,12 @@ cdef class MICMat:
         # assert self.shape == (K, pooled_H, pooled_W, N), 'Output shape is ' + `self.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
         # assert argmaxs.shape == (K, pooled_H, pooled_W, N), 'Argmax shape is ' + `self.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
 
-        times = time.time()
         if layer == 1:
-            start_time = time.time()
-            #if not argmaxs_fixed:
             cmicmat.convolution_layer1(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
-
-            #else:
-                #cmicmat.convolve_argmaxs_fixed_layer1(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded)
         
         elif layer == 2:
-            #if not argmaxs_fixed:
-            cmicmat.convolve_and_pool_layer2(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
+            cmicmat.convolution_layer2(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
 
-            #else:
-                #cmicmat.convolve_argmaxs_fixed_layer2(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded)
 
     def convolution_gradient(self, MICMat inputs, MICMat filters, MICMat argmaxs,
         MICMat gradient_pooled_outputs, MICMat gradient_inputs, 
