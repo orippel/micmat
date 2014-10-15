@@ -99,6 +99,17 @@ def main():
 
     C.check_mic_status()
 
+    A = C.MICMat((N, K, H, W)).offload_mic().fill_randn(stream, 0., 1.)
+
+    B = A.deepcopy()
+    B.permute_dimensions((0, 2, 3, 1), scratch)
+    
+    A_np = A.ndarray()
+    B_np = np.transpose(A_np, (0, 2, 3, 1))
+
+    print np.abs(B_np - B.ndarray()).sum()
+
+
     if examine_convolution:
         test_convolution(time_and_dont_test, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block)
 

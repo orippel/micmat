@@ -180,11 +180,14 @@ void response_normalization(int N, int K, int H, int W, float *INPUTS, float *OU
 void response_normalization_gradient(int N, int K, int H, int W, float *INPUTS, float *OUTPUTS, float *D_INPUTS, float *D_OUTPUTS, float ALPHA, float BETA, int LOCAL_RADIUS);
 
 void permute_dimensions(int D1, int D2, int D3, int D4, int perm1, int perm2, int perm3, int perm4, float *TENSOR, float *SCRATCH);
+void permute_dimensions_int(int D1, int D2, int D3, int D4, int perm1, int perm2, int perm3, int perm4, int *TENSOR, float *SCRATCH);
 
 void interleave_block(int N, int C, int BLOCKSIZE, float *TENSOR, float *SCRATCH);
 void interleave_block_int(int N, int C, int BLOCKSIZE, int *TENSOR, float *SCRATCH);
 void uninterleave_block(int N, int C, int BLOCKSIZE, float *TENSOR, float *SCRATCH);
 void uninterleave_block_int(int N, int C, int BLOCKSIZE, int *TENSOR, float *SCRATCH);
+void interleave_for_gradient(int N, int C, int H, int W, int BLOCKSIZE, float *TENSOR, float *SCRATCH);
+void uninterleave_for_gradient(int N, int C, int H, int W, int BLOCKSIZE, float *TENSOR, float *SCRATCH);
 
 void transpose_replace(int N, int C, float *INPUT, float *OUTPUT);
 void transpose_replace_int(int N, int C, int *INPUT, float *OUTPUT);

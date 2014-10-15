@@ -679,7 +679,12 @@ cdef class MICMat:
     def permute_dimensions(self, dimensions, MICMat scratch):
         D1, D2, D3, D4 = self.shape
         perm1, perm2, perm3, perm4 = dimensions
-        cmicmat.permute_dimensions(D1, D2, D3, D4, perm1, perm2, perm3, perm4, self.A, scratch.A)
+        
+        if self.dtype == 0:
+            cmicmat.permute_dimensions(D1, D2, D3, D4, perm1, perm2, perm3, perm4, self.A, scratch.A)
+
+        elif self.dtype == 1:
+            cmicmat.permute_dimensions_int(D1, D2, D3, D4, perm1, perm2, perm3, perm4, self.A_int, scratch.A)            
 
         self.shape = tuple([self.shape[p] for p in dimensions])
 
@@ -695,6 +700,22 @@ cdef class MICMat:
         elif self.dtype == 1:
             cmicmat.interleave_block_int(N, C, block, self.A_int, scratch.A)      
 
+        return self
+
+    def interleave_for_gradient(self, int block, MICMat scratch):
+        N, C, H, W = self.shape
+        
+        if block > 1:
+            cmicmat.interleave_for_gradient(N, C, H, W, block, self.A, scratch.A)
+
+        return self
+
+    def uninterleave_for_gradient(self, int block, MICMat scratch):
+        N, C, H, W = self.shape
+        
+        if block > 1:
+            cmicmat.uninterleave_for_gradient(N, C, H, W, block, self.A, scratch.A)
+        
         return self
 
     def uninterleave_block(self, int block, MICMat scratch):
@@ -737,8 +758,8 @@ cdef class MICMat:
         int layer, MICMat scratch):
         # self is the filters gradient
 
-        C, H, W, N = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
-        K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
+        N, C, H, W = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3] # [N, C, H, W]
+        K, Y, X = filters.shape[0], filters.shape[1], filters.shape[2] # [K, Y, X, C]
 
         output_H = (H + 2*padding - Y + 1)/stride
         output_W = (W + 2*padding - X + 1)/stride
