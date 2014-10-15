@@ -34,7 +34,7 @@ def main():
             K_block = 4
             C_block = 1
 
-            N = 236 # faster if N is a multiple of 236 (stems from needing N/N_block*K/K_block to be divisible by 236)
+            N = 128 # faster if N is a multiple of 236 (stems from needing N/N_block*K/K_block to be divisible by 236)
             K = 64
             c = 64
             H = 13
@@ -99,15 +99,15 @@ def main():
 
     C.check_mic_status()
 
-    A = C.MICMat((N, K, H, W)).offload_mic().fill_randn(stream, 0., 1.)
+    # A = C.MICMat((N, K, H, W)).offload_mic().fill_randn(stream, 0., 1.)
 
-    B = A.deepcopy()
-    B.permute_dimensions((0, 2, 3, 1), scratch)
+    # B = A.deepcopy()
+    # B.permute_dimensions((0, 2, 3, 1), scratch)
     
-    A_np = A.ndarray()
-    B_np = np.transpose(A_np, (0, 2, 3, 1))
+    # A_np = A.ndarray()
+    # B_np = np.transpose(A_np, (0, 2, 3, 1))
 
-    print np.abs(B_np - B.ndarray()).sum()
+    # print np.abs(B_np - B.ndarray()).sum()
 
 
     if examine_convolution:
@@ -281,6 +281,8 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
 
     # timer.tic()
     inputs.interleave_block(N_block, scratch)
+    outputs.interleave_block(N_block, scratch)
+    argmaxs.interleave_block(N_block, scratch)
     # timer.elapsed()
 
     # timer.tic()
@@ -298,19 +300,22 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
 
     # timer.tic()
     inputs.uninterleave_block(N_block, scratch)
+    inputs.rotate_dimensions('backward', scratch)
     # timer.elapsed()
 
     # timer.tic()
     outputs.uninterleave_block(N_block, scratch)
+    outputs.rotate_dimensions('backward', scratch)
     # timer.elapsed()
 
     # timer.tic()
     argmaxs.uninterleave_block(N_block, scratch)
+    argmaxs.rotate_dimensions('backward', scratch)
     # timer.elapsed()
 
     filters.uninterleave_block(K_block, scratch)
     filters.rotate_dimensions('backward', scratch)
-    
+
     # print outputs
 
     print '\n \n Convolution time: %f seconds.' % test_time
@@ -370,6 +375,11 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
 
     else:
         if test_gradient:
+            inputs.interleave_for_gradient(C_block, scratch)
+            filters.permute_dimensions((0, 2, 3, 1), scratch)
+            argmaxs.permute_dimensions((0, 2, 3, 1), scratch)
+            outputs.permute_dimensions((0, 2, 3, 1), scratch) # d_pooled_outputs
+
             gradient_pooled_outputs = outputs.deepcopy()
             gradient_filters = filters.deepcopy()
             gradient_inputs = inputs.deepcopy()
