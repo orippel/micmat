@@ -40,8 +40,8 @@ def main():
             W_arg_block_grad = None # will set to be output_W
             Y_block_grad = 1
 
-            N = 1024 # faster if N is a multiple of 236 (stems from needing N/N_block*K/K_block to be divisible by 236)
-            K = 128
+            N = 236 # faster if N is a multiple of 236 (stems from needing N/N_block*K/K_block to be divisible by 236)
+            K = 64
             c = 64
             H = 13
             W = 13
@@ -189,8 +189,8 @@ def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooli
     contents = '#define N_BLOCK ' + `N_block` + '\n' + \
             '#define K_BLOCK ' + `K_block` + '\n' + \
             '#define C_BLOCK ' + `C_block` + '\n\n'
-            
-            '#define N_BLOCK_GRAD ' + `N_block_grad` + '\n' + \
+
+    contents += '#define N_BLOCK_GRAD ' + `N_block_grad` + '\n' + \
             '#define C_BLOCK_GRAD ' + `C_block_grad` + '\n' + \
             '#define H_ARG_BLOCK_GRAD ' + `H_arg_block_grad` + '\n' + \
             '#define W_ARG_BLOCK_GRAD ' + `W_arg_block_grad` + '\n' + \
