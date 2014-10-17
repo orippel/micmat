@@ -567,11 +567,17 @@ cdef class MICMat:
 
     def ndarray(self):
         
+        cdef np.ndarray[np.float32_t, ndim = 2] S2
         cdef np.ndarray[np.float32_t, ndim = 4] S4
         cdef np.ndarray[np.float32_t, ndim = 6] S6
 
         if self.offloaded:
             self.pull_mic()
+
+        if self.ndim == 2:
+            S2 = np.zeros(self.shape, dtype = np.float32)
+            S2.data = <char *> cmicmat.unalign_host(self.size, self.A)
+            return S2
 
         if self.ndim == 4:
             S4 = np.zeros(self.shape, dtype = np.float32)
@@ -778,14 +784,14 @@ cdef class MICMat:
             cmicmat.convolve_gradient_layer2(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
                 gradient_inputs.A, self.A, scratch.A)
 
-    def convolve_and_pool_replace(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch, shadow):
+    def convolve_and_pool_replace(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch):
         # asserts that check number of dimensions, sizes, etc
 
         N, C, H, W = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
         K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
         
         K_preshadow = K
-        K = 2*K if shadow else K
+        # K = 2*K if shadow else K
 
         output_H = (H + 2*padding - Y + 1)/stride
         output_W = (W + 2*padding - X + 1)/stride
@@ -799,11 +805,11 @@ cdef class MICMat:
         if layer == 1:
             start_time = time.time()
             #if not argmaxs_fixed:
-            if not shadow:
-                cmicmat.convolve_and_pool_layer1(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
+            # if not shadow:
+            cmicmat.convolve_and_pool_layer1(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
 
-            else:
-                cmicmat.convolve_and_pool_shadow_layer1(N, C, H, W, inputs.A, K_preshadow, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)                
+            # else:
+                # cmicmat.convolve_and_pool_shadow_layer1(N, C, H, W, inputs.A, K_preshadow, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)                
 
             #else:
                 #cmicmat.convolve_argmaxs_fixed_layer1(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded)
@@ -908,13 +914,14 @@ cdef class MICMat:
 
     def convolve_gradient(self, MICMat inputs, MICMat filters, MICMat argmaxs,
         MICMat gradient_pooled_outputs, MICMat gradient_inputs, 
-        int stride, int padding, int pooling_radius, int pooling_stride, layer, MICMat scratch, shadow):
+        int stride, int padding, int pooling_radius, int pooling_stride, layer, MICMat scratch):
         # self is the filters gradient
         N, C, H, W = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
         K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
 
         K_preshadow = K
-        K = 2*K if shadow else K
+        # K = 2*K if shadow else K
+
         # pooled_H = np.ceil((<float> (H - Y + 1))/pool_radius)
         # pooled_W = np.ceil((<float> (W - X + 1))/pool_radius)
         output_H = (H + 2*padding - Y + 1)/stride
@@ -934,9 +941,9 @@ cdef class MICMat:
                 gradient_inputs.A, self.A, scratch.A)
 
             # print self
-            if shadow:
-                cmicmat.convolve_gradient_shadow_layer1(N, C, H, W, inputs.A, K_preshadow, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
-                    gradient_inputs.A, self.A, scratch.A)
+            # if shadow:
+            #     cmicmat.convolve_gradient_shadow_layer1(N, C, H, W, inputs.A, K_preshadow, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+            #         gradient_inputs.A, self.A, scratch.A)
                 # self *= 2.
             # print self
 

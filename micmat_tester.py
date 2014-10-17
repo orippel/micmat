@@ -34,8 +34,14 @@ def main():
             K_block = 4
             C_block = 1
 
-            N = 128 # faster if N is a multiple of 236 (stems from needing N/N_block*K/K_block to be divisible by 236)
-            K = 64
+            N_block_grad = 16
+            C_block_grad = 1
+            H_arg_block_grad = 1
+            W_arg_block_grad = None # will set to be output_W
+            Y_block_grad = 1
+
+            N = 1024 # faster if N is a multiple of 236 (stems from needing N/N_block*K/K_block to be divisible by 236)
+            K = 128
             c = 64
             H = 13
             W = 13
@@ -88,7 +94,7 @@ def main():
     global C, stream, timer
     timer = Timer()
 
-    recompile_MICMat(N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, N_block, K_block, C_block)
+    recompile_MICMat(N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, N_block, K_block, C_block, N_block_grad, C_block_grad, H_arg_block_grad, W_arg_block_grad, Y_block_grad)
     import micmat_wrap as C
 
     stream = C.RandGen()
@@ -161,7 +167,7 @@ class Timer:
         print 'Elapsed: %s.' % (time.time() - self.start_time)
 
 
-def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, N_block, K_block, C_block):
+def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, N_block, K_block, C_block, N_block_grad, C_block_grad, H_arg_block_grad, W_arg_block_grad, Y_block_grad):
     
     OUTPUT_PATH = '/global/homes/r/rippel/sota/output/default/'
     SPECIFIC_MICMAT_PATH = OUTPUT_PATH + 'micmat/'
@@ -176,11 +182,22 @@ def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooli
     pooled_H = int(np.ceil((output_H - pooling_radius + 1.)/pooling_stride))
     pooled_W = int(np.ceil((output_W - pooling_radius + 1.)/pooling_stride))
     
+    W_arg_block_grad = output_W
+
     macros_file = open(SPECIFIC_MICMAT_PATH + 'generated_macros.h', 'w')
     
     contents = '#define N_BLOCK ' + `N_block` + '\n' + \
             '#define K_BLOCK ' + `K_block` + '\n' + \
             '#define C_BLOCK ' + `C_block` + '\n\n'
+            
+            '#define N_BLOCK_GRAD ' + `N_block_grad` + '\n' + \
+            '#define C_BLOCK_GRAD ' + `C_block_grad` + '\n' + \
+            '#define H_ARG_BLOCK_GRAD ' + `H_arg_block_grad` + '\n' + \
+            '#define W_ARG_BLOCK_GRAD ' + `W_arg_block_grad` + '\n' + \
+            '#define Y_BLOCK_GRAD ' + `Y_block_grad` + '\n\n'
+            #define H_ARG_BLOCK 1
+#define W_ARG_BLOCK output_W_const
+#define Y_BLOCK 1
 
     contents += '#define C_const ' + `c` + '\n' + \
             '#define H_const ' + `H` + '\n' + \

@@ -4172,17 +4172,13 @@ void uninterleave_block_int(const int N, const int C, const int BLOCKSIZE, int *
 //     } // pragma offload
 // }
 
+
+
 // gradient for intense blocking/data sturctures
-#define H_ARG_BLOCK 1
-#define W_ARG_BLOCK output_W_const
-#define Y_BLOCK 1
 
 // INPUTS data structure [N, C/C_BLOCK, H, W, C_BLOCK]
 // D_FILTERS/FILTERS data structure [K, Y, X, C]
 // ARGMAXS/OUTPUTS/D_POOLED_OUTPUTS data structure [N, pooled_H, pooled_W, K]
-
-// things to incrementally add:
-// 1. scan only over pool windows
 void convolution_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_POOLED_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH){
     assert(C == C_const);
     assert(H == H_const);
@@ -4206,13 +4202,13 @@ void convolution_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int 
     in(SCRATCH:length(0) REUSE)
     {
 
-        int C_blocks = C_const/C_BLOCK;
-        int Y_blocks = Y_const/Y_BLOCK;
-        int N_blocks = N/N_BLOCK;
-        int H_blocks = output_H_const/H_ARG_BLOCK;
-        int W_blocks = output_W_const/W_ARG_BLOCK;
+        int C_blocks = C_const/C_BLOCK_GRAD;
+        int Y_blocks = Y_const/Y_BLOCK_GRAD;
+        int N_blocks = N/N_BLOCK_GRAD;
+        int H_blocks = output_H_const/H_ARG_BLOCK_GRAD;
+        int W_blocks = output_W_const/W_ARG_BLOCK_GRAD;
 
-        SCRATCH[0 : omp_get_max_threads()*C_blocks*Y_blocks*K_const*Y_BLOCK*X_const*C_BLOCK] = 0.f;
+        SCRATCH[0 : omp_get_max_threads()*C_blocks*Y_blocks*K_const*Y_BLOCK_GRAD*X_const*C_BLOCK_GRAD] = 0.f;
 
         #pragma omp parallel for \
         default(none) \
@@ -4221,29 +4217,29 @@ void convolution_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int 
 
         for (int outer = 0; outer < N_blocks * H_blocks * W_blocks * C_blocks * Y_blocks; outer++){
             int n_block = outer / (H_blocks * W_blocks * C_blocks * Y_blocks);
-            int n = n_block*N_BLOCK;
+            int n = n_block*N_BLOCK_GRAD;
 
             int h_block = md(outer, H_blocks * W_blocks * C_blocks * Y_blocks) / (W_blocks * C_blocks * Y_blocks);
-            int h = h_block * H_ARG_BLOCK;
+            int h = h_block * H_ARG_BLOCK_GRAD;
 
             int w_block = md(outer, W_blocks * C_blocks * Y_blocks) / (C_blocks * Y_blocks);
-            int w = w_block * W_ARG_BLOCK;
+            int w = w_block * W_ARG_BLOCK_GRAD;
 
             int c_block = md(outer, C_blocks * Y_blocks) / (Y_blocks);
-            int c = c_block * C_BLOCK;
+            int c = c_block * C_BLOCK_GRAD;
 
             int y_block = md(outer, Y_blocks);
-            int y = y_block * Y_BLOCK;
+            int y = y_block * Y_BLOCK_GRAD;
 
             assert(outer == ti5(n_block, h_block, w_block, c_block, y_block, H_blocks, W_blocks, C_blocks, Y_blocks));
 
             float *restrict local_scratch = SCRATCH + ti7(omp_get_thread_num(), c_block,  y_block,  0,      0,        0,       0, 
-                                                                                C_blocks, Y_blocks, K_const, Y_BLOCK, X_const, C_BLOCK);
+                                                                                C_blocks, Y_blocks, K_const, Y_BLOCK_GRAD, X_const, C_BLOCK_GRAD);
 
             // for each element in the pre-pooled outputs, find out whether it is an argmax 
-            for (int n_tot = n; n_tot < n + N_BLOCK; n_tot++){
-                for (int h_arg = h; h_arg < mn(h + H_ARG_BLOCK, output_H_const); h_arg++){
-                    for (int w_arg = w; w_arg < mn(w + W_ARG_BLOCK, output_W_const); w_arg++){
+            for (int n_tot = n; n_tot < n + N_BLOCK_GRAD; n_tot++){
+                for (int h_arg = h; h_arg < mn(h + H_ARG_BLOCK_GRAD, output_H_const); h_arg++){
+                    for (int w_arg = w; w_arg < mn(w + W_ARG_BLOCK_GRAD, output_W_const); w_arg++){
 
                         int linear_index = h_arg*output_W_const + w_arg;
 
@@ -4273,15 +4269,15 @@ void convolution_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int 
                                         
                                         int w_inputs = mx(mn(w_arg - padding_const, W_const - 1), 0);
                                         
-                                        for (int yy = 0; yy < Y_BLOCK; yy++){
+                                        for (int yy = 0; yy < Y_BLOCK_GRAD; yy++){
                                             if ((y + yy + h_arg - padding_const >= 0) && (y + yy + h_arg - padding_const < H_const)){
                                                 int h_inputs = h_arg + y + yy - padding_const;
                                               
                                                 local_scratch[ti(k,   yy,        x_invalid_left,   0, 
-                                                                      Y_BLOCK,   X_const,          C_BLOCK) : x_len*C_BLOCK] += 
+                                                                      Y_BLOCK_GRAD,   X_const,          C_BLOCK_GRAD) : x_len*C_BLOCK_GRAD] += 
                                                     pooled_outputs_coefficient *
                                                     INPUTS[ti5(n_tot,  c_block,    h_inputs,    w_inputs,   0, 
-                                                                       C_blocks,   H_const,     W_const,    C_BLOCK) : x_len*C_BLOCK];
+                                                                       C_blocks,   H_const,     W_const,    C_BLOCK_GRAD) : x_len*C_BLOCK_GRAD];
                                             } // if
                                         } //yy
                                     } // if
@@ -4302,16 +4298,16 @@ void convolution_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int 
             #pragma omp parallel for
             for (int k = 0; k < K_const; k++){
                 for (int c_block = 0; c_block < C_blocks; c_block++){
-                    int c = c_block*C_BLOCK;
+                    int c = c_block*C_BLOCK_GRAD;
 
                     for (int y = 0; y < Y_const; y++){
-                        int y_block = y / Y_BLOCK;
-                        int yy = md(y, Y_BLOCK);
+                        int y_block = y / Y_BLOCK_GRAD;
+                        int yy = md(y, Y_BLOCK_GRAD);
 
                         for (int x = 0; x < X_const; x++){
-                            D_FILTERS[ti(k, y, x, c, Y_const, X_const, C_const) : C_BLOCK] += 
+                            D_FILTERS[ti(k, y, x, c, Y_const, X_const, C_const) : C_BLOCK_GRAD] += 
                              SCRATCH[ti7(thread,  c_block,  y_block,  k,       yy,      x,       0, 
-                                                  C_blocks, Y_blocks, K_const, Y_BLOCK, X_const, C_BLOCK) : C_BLOCK];
+                                                  C_blocks, Y_blocks, K_const, Y_BLOCK_GRAD, X_const, C_BLOCK_GRAD) : C_BLOCK_GRAD];
                         }
 
                     }
