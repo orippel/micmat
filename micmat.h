@@ -18,6 +18,8 @@
 
 void tester(void);
 
+void initialize_locks();
+
 void speed_tester(int N, float *INPUTS, float *OUTPUTS);
 
 float *allocate_host(int N);

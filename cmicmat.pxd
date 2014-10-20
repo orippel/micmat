@@ -10,6 +10,8 @@
 cdef extern from "micmat.h":
     void tester()
 
+    void initialize_locks()
+
     void speed_tester(int N, float *INPUTS, float *OUTPUTS)
 
     float *allocate_host(int N)

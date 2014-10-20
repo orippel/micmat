@@ -2548,3 +2548,16 @@ void uninterleave_block_int(const int N, const int C, const int BLOCKSIZE, int *
 //         } // khw
 //     } // pragma offload
 // }
+
+void initialize_locks(){
+
+    #pragma offload target(mic:MIC_DEV)
+    {
+
+        omp_lock_t writelock[C_BLOCK_GRAD*Y_BLOCK_GRAD*16];
+ 
+        for(int i = 0; i < C_BLOCK_GRAD*Y_BLOCK_GRAD; i++)      
+            omp_init_lock(&writelock[16*i]);
+
+    }
+}

@@ -734,7 +734,7 @@ cdef class MICMat:
         elif self.dtype == 1:
             cmicmat.uninterleave_block_int(N, C, block, self.A_int, scratch.A)      
 
-        return self      
+        return self  
 
     def convolution(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch):
         # asserts that check number of dimensions, sizes, etc
@@ -1569,6 +1569,9 @@ cdef class Scratch(MICMat):
         else:
             index = args[0]
             return sum([np.product(shape) for shape in self.shapes[:index]])
+
+def initialize_locks():
+    cmicmat.initialize_locks()    
 
 def ping_each_core():
         print 'Pinging each core on the MIC.'

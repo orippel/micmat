@@ -70,6 +70,12 @@ def main():
             pooling_stride = 1
     
     else:
+        N_block_grad = 16
+        C_block_grad = 1
+        H_arg_block_grad = 1
+        W_arg_block_grad = None # will set to be output_W
+        Y_block_grad = 1
+
         N_block = 16
         K_block = 4
         C_block = 2
@@ -115,7 +121,7 @@ def main():
 
     # print np.abs(B_np - B.ndarray()).sum()
 
-
+    C.initialize_locks()
     if examine_convolution:
         test_convolution(time_and_dont_test, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block)
 
@@ -317,17 +323,16 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
 
     # timer.tic()
     inputs.uninterleave_block(N_block, scratch)
-    inputs.rotate_dimensions('backward', scratch)
-    # timer.elapsed()
+        # timer.elapsed()
 
     # timer.tic()
     outputs.uninterleave_block(N_block, scratch)
-    outputs.rotate_dimensions('backward', scratch)
+
     # timer.elapsed()
 
     # timer.tic()
     argmaxs.uninterleave_block(N_block, scratch)
-    argmaxs.rotate_dimensions('backward', scratch)
+
     # timer.elapsed()
 
     filters.uninterleave_block(K_block, scratch)
@@ -346,6 +351,9 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
 
     if not time_and_dont_test:
         print 'Running convolution test. '
+        print inputs.shape
+        print filters.shape
+        print outputs.shape
         inputs_np = np.lib.pad(inputs.ndarray(), ((0, 0), (padding, padding), (padding, padding), (0, 0)), 'constant', constant_values = (0, 0))
 
         filters_np = filters.ndarray()
@@ -392,6 +400,11 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
 
     else:
         if test_gradient:
+            inputs.rotate_dimensions('backward', scratch)
+            outputs.rotate_dimensions('backward', scratch)
+            argmaxs.rotate_dimensions('backward', scratch)
+            
+
             inputs.interleave_for_gradient(C_block, scratch)
             filters.permute_dimensions((0, 2, 3, 1), scratch)
             argmaxs.permute_dimensions((0, 2, 3, 1), scratch)
