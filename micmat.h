@@ -18,7 +18,7 @@
 
 void tester(void);
 
-void initialize_locks();
+// omp_lock_t *initialize_locks();
 
 void speed_tester(int N, float *INPUTS, float *OUTPUTS);
 

@@ -10,7 +10,9 @@
 cdef extern from "micmat.h":
     void tester()
 
-    void initialize_locks()
+    # ctypedef void *OmpLock
+
+    # OmpLock *initialize_locks()
 
     void speed_tester(int N, float *INPUTS, float *OUTPUTS)
 

@@ -34,13 +34,13 @@ def main():
             K_block = 4
             C_block = 1
 
-            N_block_grad = 16
-            C_block_grad = 1
+            N_block_grad = None
+            C_block_grad = 16
             H_arg_block_grad = 1
             W_arg_block_grad = None # will set to be output_W
             Y_block_grad = 1
 
-            N = 236 # faster if N is a multiple of 236 (stems from needing N/N_block*K/K_block to be divisible by 236)
+            N = 128 # faster if N is a multiple of 236 (stems from needing N/N_block*K/K_block to be divisible by 236)
             K = 64
             c = 64
             H = 13
@@ -70,7 +70,7 @@ def main():
             pooling_stride = 1
     
     else:
-        N_block_grad = 16
+        N_block_grad = None
         C_block_grad = 1
         H_arg_block_grad = 1
         W_arg_block_grad = None # will set to be output_W
@@ -121,7 +121,7 @@ def main():
 
     # print np.abs(B_np - B.ndarray()).sum()
 
-    C.initialize_locks()
+    # C.initialize_locks()
     if examine_convolution:
         test_convolution(time_and_dont_test, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block)
 

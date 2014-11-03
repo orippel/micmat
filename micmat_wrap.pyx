@@ -1142,6 +1142,32 @@ cdef class MICMat:
 
         return self
 
+    def update_curve(self, diff, dm1, d0, t, compute):
+        a = 0.0001
+        if compute == 'curve':
+            self.update(d0, t/a)
+            
+            self.update(d0, 2.*(t/a)**2.)
+            self.update(dm1, (t/a)**2.)
+            self.update(diff, 3.*(t/a)**2.)
+
+            self.update(d0, (t/a)**3.)
+            self.update(dm1, (t/a)**3.)
+            self.update(diff, 2.*(t/a)**3.)
+
+        elif compute == 'gradient':
+            self.replace(d0)
+            self.scale(1./a)
+            
+            self.update(d0, 4.*(t/a)/a)
+            self.update(dm1, 2.*(t/a)/a)
+            self.update(diff, 6.*(t/a)/a)
+
+            self.update(d0, 3./a*(t/a)**2.)
+            self.update(dm1, 3./a*(t/a)**2.)
+            self.update(diff, 6./a*(t/a)**2.)
+
+
     def multiply(self, V):
         cdef MICMat V_MICMat
 
@@ -1570,8 +1596,10 @@ cdef class Scratch(MICMat):
             index = args[0]
             return sum([np.product(shape) for shape in self.shapes[:index]])
 
-def initialize_locks():
-    cmicmat.initialize_locks()    
+# def initialize_locks():
+#     cdef OmpLock lock
+#     lock = cmicmat.initialize_locks()
+#     return lock
 
 def ping_each_core():
         print 'Pinging each core on the MIC.'
