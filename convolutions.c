@@ -1397,15 +1397,14 @@ void interleave_block(const int N, const int C, const int BLOCKSIZE, float *rest
             private(n_block, n, c) \
             shared(N, TENSOR, SCRATCH, C, BLOCKSIZE)
 
-        for (int nc = 0; nc < N/BLOCKSIZE*C; nc++){
-            n_block = nc / C;
-            n = n_block*BLOCKSIZE;
-            c = md(nc, C);
-            
-            float *restrict tensor_pointer = TENSOR + ti3(n_block, c, 0, C, BLOCKSIZE);
-            float *restrict scratch_pointer = SCRATCH + ti2(c, n, N);
+        for (int c = 0; c < C; c++){
+            // float *restrict tensor_pointer = TENSOR + ti3(n_block, c, 0, C, BLOCKSIZE);
+            // float *restrict scratch_pointer = SCRATCH + ti2(c, n, N);
 
-            tensor_pointer[0 : BLOCKSIZE] = scratch_pointer[0 : BLOCKSIZE];
+            for (n_block = 0; n_block < N/BLOCKSIZE; n_block++){
+                TENSOR[(n_block*C + c)*BLOCKSIZE : BLOCKSIZE] = SCRATCH[c*N + n_block*BLOCKSIZE : BLOCKSIZE];    
+            }
+            
         } // nc
     } // pragma offload
 }

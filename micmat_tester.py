@@ -35,14 +35,14 @@ def main():
             C_block = 1
 
             N_block_grad = None
-            C_block_grad = 16
+            C_block_grad = 3
             H_arg_block_grad = 1
             W_arg_block_grad = None # will set to be output_W
             Y_block_grad = 1
 
-            N = 128 # faster if N is a multiple of 236 (stems from needing N/N_block*K/K_block to be divisible by 236)
+            N = 236 # faster if N is a multiple of 236 (stems from needing N/N_block*K/K_block to be divisible by 236)
             K = 64
-            c = 64
+            c = 3
             H = 13
             W = 13
             X = 5
@@ -70,10 +70,10 @@ def main():
             pooling_stride = 1
     
     else:
-        N_block_grad = None
+        N_block_grad = 1
         C_block_grad = 1
         H_arg_block_grad = 1
-        W_arg_block_grad = None # will set to be output_W
+        W_arg_block_grad = 1 # will set to be output_W
         Y_block_grad = 1
 
         N_block = 16
@@ -174,7 +174,6 @@ class Timer:
 
 
 def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, N_block, K_block, C_block, N_block_grad, C_block_grad, H_arg_block_grad, W_arg_block_grad, Y_block_grad):
-    
     OUTPUT_PATH = '/global/homes/r/rippel/sota/output/default/'
     SPECIFIC_MICMAT_PATH = OUTPUT_PATH + 'micmat/'
     MICMAT_PATH = '/global/homes/r/rippel/sota/micmat/'
@@ -187,9 +186,10 @@ def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooli
     output_W = (W + 2*padding - X + 1)/stride
     pooled_H = int(np.ceil((output_H - pooling_radius + 1.)/pooling_stride))
     pooled_W = int(np.ceil((output_W - pooling_radius + 1.)/pooling_stride))
-    
-    W_arg_block_grad = output_W
 
+    N_block_grad = N
+    W_arg_block_grad = output_W
+    
     macros_file = open(SPECIFIC_MICMAT_PATH + 'generated_macros.h', 'w')
     
     contents = '#define N_BLOCK ' + `N_block` + '\n' + \
@@ -302,44 +302,41 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
 
     print 'Computing convolution now.'
 
-    # timer.tic()
+    timer.tic()
     inputs.interleave_block(N_block, scratch)
     outputs.interleave_block(N_block, scratch)
     argmaxs.interleave_block(N_block, scratch)
-    # timer.elapsed()
-
-    # timer.tic()
-    filters.rotate_dimensions('forward', scratch)
-    # timer.elapsed()
-
-    # timer.tic()
     filters.interleave_block(K_block, scratch)
-    # timer.elapsed()
+    interleave_time = timer.toc()
 
+    timer.tic()
+    filters.rotate_dimensions('forward', scratch)
+    rotation_time = timer.toc()
+
+
+
+    
     timer.tic()
     outputs.convolution(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, False, scratch)
     # outputs.convolve_and_pool_replace(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, False, scratch, shadow)
     test_time = timer.toc()
 
-    # timer.tic()
+    timer.tic()
     inputs.uninterleave_block(N_block, scratch)
-        # timer.elapsed()
-
-    # timer.tic()
     outputs.uninterleave_block(N_block, scratch)
-
-    # timer.elapsed()
-
-    # timer.tic()
     argmaxs.uninterleave_block(N_block, scratch)
-
-    # timer.elapsed()
-
     filters.uninterleave_block(K_block, scratch)
-    filters.rotate_dimensions('backward', scratch)
+    uninterleave_time = timer.toc()
 
+    timer.tic()
+    filters.rotate_dimensions('backward', scratch)
+    rotation_backward_time = timer.toc()
     # print outputs
 
+    print 'Interleaving time: %f seconds.' % interleave_time
+    print 'Un-interleaving time: %f seconds.' % uninterleave_time
+    print 'Rotation time: %f seconds.' % rotation_time
+    print 'Rotation backward time: %f seconds.' % rotation_backward_time
     print '\n \n Convolution time: %f seconds.' % test_time
     print 'Speed: %f Gflops.' % (num_operations/test_time*1e-9)
 
