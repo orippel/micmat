@@ -1193,12 +1193,27 @@ cdef class MICMat:
 
         if type(V) == MICMat:
             V_MICMat = V
-            assert (self.ROWS == V_MICMat.ROWS and self.COLS == V_MICMat.COLS) or (self.ROWS == V_MICMat.ROWS and V_MICMat.COLS == 1) or (V_MICMat.ROWS == 1 and self.COLS == V_MICMat.COLS) or (V_MICMat.ROWS == 1 and V_MICMat.COLS == 1), 'Matrix dimensions ' + `self.shape` + ' and ' + `V.shape` + ' don\'t match in update.'
-            cmicmat.divide(self.ROWS, self.COLS, self.A, V_MICMat.ROWS, V_MICMat.COLS, V_MICMat.A)
+            if V_MICMat.ndim == 2:
+                assert (self.ROWS == V_MICMat.ROWS and self.COLS == V_MICMat.COLS) or (self.ROWS == V_MICMat.ROWS and V_MICMat.COLS == 1) or (V_MICMat.ROWS == 1 and self.COLS == V_MICMat.COLS) or (V_MICMat.ROWS == 1 and V_MICMat.COLS == 1), 'Matrix dimensions ' + `self.shape` + ' and ' + `V.shape` + ' don\'t match in update.'
+                cmicmat.divide(self.ROWS, self.COLS, self.A, V_MICMat.ROWS, V_MICMat.COLS, V_MICMat.A)
+
+            else: # multiply elementwise for tensors
+                assert self.size == V_MICMat.size, 'Tensors multiplied must have same sizes, and instead have shapes ' + `self.shape` + ' and ' + `V_MICMat.shape` + '.'    
+                cmicmat.divide(self.size, 1, self.A, V_MICMat.size, 1, V_MICMat.A)          
+        
         elif type(V) == np.float32 or type(V) == np.float64 or type(V) == float or type(V) == int:
             if type(V) == np.float64:
                 V = V.astype(np.float32)
-            cmicmat.scale(self.size, self.A, 1.0/V)
+            cmicmat.scale(self.size, self.A, 1./V)
+
+        # if type(V) == MICMat:
+        #     V_MICMat = V
+        #     assert (self.ROWS == V_MICMat.ROWS and self.COLS == V_MICMat.COLS) or (self.ROWS == V_MICMat.ROWS and V_MICMat.COLS == 1) or (V_MICMat.ROWS == 1 and self.COLS == V_MICMat.COLS) or (V_MICMat.ROWS == 1 and V_MICMat.COLS == 1), 'Matrix dimensions ' + `self.shape` + ' and ' + `V.shape` + ' don\'t match in update.'
+        #     cmicmat.divide(self.ROWS, self.COLS, self.A, V_MICMat.ROWS, V_MICMat.COLS, V_MICMat.A)
+        # elif type(V) == np.float32 or type(V) == np.float64 or type(V) == float or type(V) == int:
+        #     if type(V) == np.float64:
+        #         V = V.astype(np.float32)
+        #     cmicmat.scale(self.size, self.A, 1.0/V)
 
         return self
 

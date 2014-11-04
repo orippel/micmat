@@ -304,10 +304,19 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
 
     timer.tic()
     inputs.interleave_block(N_block, scratch)
+    input_interleave_time = timer.toc()
+
+    timer.tic()
     outputs.interleave_block(N_block, scratch)
+    output_interleave_time = timer.toc()
+
+    timer.tic()
     argmaxs.interleave_block(N_block, scratch)
+    argmax_interleave_time = timer.toc()
+    
+    timer.tic()
     filters.interleave_block(K_block, scratch)
-    interleave_time = timer.toc()
+    filter_interleave_time = timer.toc()
 
     timer.tic()
     filters.rotate_dimensions('forward', scratch)
@@ -323,21 +332,38 @@ def test_convolution(time_and_dont_test, test_gradient, offload, N, K, c, H, W, 
 
     timer.tic()
     inputs.uninterleave_block(N_block, scratch)
+    input_uninterleave_time = timer.toc()
+
+    timer.tic()
     outputs.uninterleave_block(N_block, scratch)
+    output_uninterleave_time = timer.toc()
+
+    timer.tic()
     argmaxs.uninterleave_block(N_block, scratch)
+    argmax_uninterleave_time = timer.toc()
+    
+    timer.tic()
     filters.uninterleave_block(K_block, scratch)
-    uninterleave_time = timer.toc()
+    filter_uninterleave_time = timer.toc()
 
     timer.tic()
     filters.rotate_dimensions('backward', scratch)
     rotation_backward_time = timer.toc()
     # print outputs
 
-    print 'Interleaving time: %f seconds.' % interleave_time
-    print 'Un-interleaving time: %f seconds.' % uninterleave_time
+    print 'Input interleaving time: %f seconds.' % input_interleave_time
+    print 'Output interleaving time: %f seconds.' % output_interleave_time
+    print 'Argmax interleaving time: %f seconds.' % argmax_interleave_time
+    print 'Filter interleaving time: %f seconds.\n' % filter_interleave_time
+
+    print 'Input un-interleaving time: %f seconds.' % input_uninterleave_time
+    print 'Output un-interleaving time: %f seconds.' % output_uninterleave_time
+    print 'Argmax un-interleaving time: %f seconds.' % argmax_uninterleave_time
+    print 'Filter un-interleaving time: %f seconds.\n' % filter_uninterleave_time
+
     print 'Rotation time: %f seconds.' % rotation_time
     print 'Rotation backward time: %f seconds.' % rotation_backward_time
-    print '\n \n Convolution time: %f seconds.' % test_time
+    print '\n \nConvolution time: %f seconds.' % test_time
     print 'Speed: %f Gflops.' % (num_operations/test_time*1e-9)
 
     # timer.tic()
