@@ -35,14 +35,14 @@ def main():
             C_block = 1
 
             N_block_grad = None
-            C_block_grad = 3
+            C_block_grad = 16
             H_arg_block_grad = 1
             W_arg_block_grad = None # will set to be output_W
             Y_block_grad = 1
 
             N = 236 # faster if N is a multiple of 236 (stems from needing N/N_block*K/K_block to be divisible by 236)
             K = 64
-            c = 3
+            c = 64
             H = 13
             W = 13
             X = 5

@@ -776,13 +776,13 @@ cdef class MICMat:
         #assert gradient_inputs.shape == inputs.shape, 'gradient_inputs shape is ' + gradient_inputs.shape + ' rather than ' + `inputs.shape` + '.'
         #assert gradient_pooled_outputs.shape == (K, pooled_H, pooled_W, N), 'gradient_pooled_outputs shape is ' + `gradient_pooled_outputs.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
         
-        if layer == 1:
-            cmicmat.convolution_gradient_layer1(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
-                gradient_inputs.A, self.A, scratch.A)
+        # if layer == 1:
+            # cmicmat.convolution_gradient_layer1(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+                # gradient_inputs.A, self.A, scratch.A)
 
-        elif layer == 2:
-            cmicmat.convolve_gradient_layer2(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
-                gradient_inputs.A, self.A, scratch.A)
+        # elif layer == 2:
+        cmicmat.convolution_gradient_layer2(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+            gradient_inputs.A, self.A, scratch.A)
 
     def convolve_and_pool_replace(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch):
         # asserts that check number of dimensions, sizes, etc

@@ -197,6 +197,7 @@ cdef extern from "micmat.h":
     void get_argmaxs(int N, int C, int H, int W, float *INPUTS, float *OUTPUTS, int *ARGMAXS)
 
     void convolution_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH)
+    void convolution_gradient_layer2(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH)
 
     void local_filtering_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH)
 
