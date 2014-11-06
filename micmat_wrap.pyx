@@ -700,11 +700,31 @@ cdef class MICMat:
         N = self.shape[-1]
         C = np.product(self.shape[0:-1])
         
-        if self.dtype == 0:
-            cmicmat.interleave_block(N, C, block, self.A, scratch.A)
+        if N != block:
+            if self.dtype == 0:
+                cmicmat.interleave_block(N, C, block, self.A, scratch.A)
 
-        elif self.dtype == 1:
-            cmicmat.interleave_block_int(N, C, block, self.A_int, scratch.A)      
+            elif self.dtype == 1:
+                cmicmat.interleave_block_int(N, C, block, self.A_int, scratch.A) 
+
+        self.shape = (N/block,) + self.shape[0:-1] + (block,)
+
+        return self
+
+    def uninterleave_block(self, MICMat scratch):
+        block = self.shape[-1]
+        N_block = self.shape[0]
+        N = block*N_block
+        C = np.product(self.shape[1:-1])
+
+        if N_block != 1:
+            if self.dtype == 0:
+                cmicmat.uninterleave_block(N, C, block, self.A, scratch.A)
+
+            elif self.dtype == 1:
+                cmicmat.uninterleave_block_int(N, C, block, self.A_int, scratch.A)
+
+        self.shape = self.shape[1:-1] + (N,)
 
         return self
 
@@ -714,34 +734,34 @@ cdef class MICMat:
         if block > 1:
             cmicmat.interleave_for_gradient(N, C, H, W, block, self.A, scratch.A)
 
+        self.shape = (N, C/block, H, W, block)
+
         return self
 
-    def uninterleave_for_gradient(self, int block, MICMat scratch):
-        N, C, H, W = self.shape
+    def uninterleave_for_gradient(self, MICMat scratch):
+        N, C_block, H, W, block = self.shape
+
+        C = C_block * block
         
         if block > 1:
             cmicmat.uninterleave_for_gradient(N, C, H, W, block, self.A, scratch.A)
+
+        self.shape = (N, C, H, W)
         
         return self
-
-    def uninterleave_block(self, int block, MICMat scratch):
-        N = self.shape[-1]
-        C = np.product(self.shape[0:-1])
-
-        if self.dtype == 0:
-            cmicmat.uninterleave_block(N, C, block, self.A, scratch.A)
-
-        elif self.dtype == 1:
-            cmicmat.uninterleave_block_int(N, C, block, self.A_int, scratch.A)      
-
-        return self  
 
     def convolution(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch):
         # asserts that check number of dimensions, sizes, etc
 
-        C, H, W, N = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
+        # C, H, W, N = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3]
         # K, Y, X = filters.shape[0], filters.shape[2], filters.shape[3]
-        _, Y, X, K = filters.shape
+        # _, Y, X, K = filters.shape
+        
+        N_block, C, H, W, N_blocksize = inputs.shape
+        K_block, _, Y, X, K_blocksize = filters.shape
+
+        N = N_block*N_blocksize
+        K = K_block*K_blocksize
 
         output_H = (H + 2*padding - Y + 1)/stride
         output_W = (W + 2*padding - X + 1)/stride
@@ -764,8 +784,20 @@ cdef class MICMat:
         int layer, MICMat scratch):
         # self is the filters gradient
 
-        N, C, H, W = inputs.shape[0], inputs.shape[1], inputs.shape[2], inputs.shape[3] # [N, C, H, W]
-        K, Y, X = filters.shape[0], filters.shape[1], filters.shape[2] # [K, Y, X, C]
+        # INPUTS data structure [N, C/C_BLOCK, H, W, C_BLOCK]
+        # D_FILTERS/FILTERS data structure [C/C_BLOCK, Y/Y_BLOCK, K, Y_BLOCK, X, C_BLOCK]
+        # ARGMAXS/OUTPUTS/D_POOLED_OUTPUTS data structure [N, pooled_H, pooled_W, K]
+
+        N, C_block, H, W, C_blocksize = inputs.shape
+        
+        if layer == 2:
+            _, Y, K, X, _ = self.shape # [C/C_BLOCK, Y, K, X, C_BLOCK]
+
+        else:
+            K, Y, X, _ = self.shape
+
+
+        C = C_block*C_blocksize
 
         output_H = (H + 2*padding - Y + 1)/stride
         output_W = (W + 2*padding - X + 1)/stride
@@ -776,13 +808,14 @@ cdef class MICMat:
         #assert gradient_inputs.shape == inputs.shape, 'gradient_inputs shape is ' + gradient_inputs.shape + ' rather than ' + `inputs.shape` + '.'
         #assert gradient_pooled_outputs.shape == (K, pooled_H, pooled_W, N), 'gradient_pooled_outputs shape is ' + `gradient_pooled_outputs.shape` + ' rather than ' + `(K, pooled_H, pooled_W, N)` + '.'
         
-        # if layer == 1:
-            # cmicmat.convolution_gradient_layer1(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
-                # gradient_inputs.A, self.A, scratch.A)
+        if layer == 1:
+            cmicmat.convolution_gradient_layer1(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+                gradient_inputs.A, self.A, scratch.A)
 
-        # elif layer == 2:
-        cmicmat.convolution_gradient_layer2(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
-            gradient_inputs.A, self.A, scratch.A)
+        elif layer == 2:
+            cmicmat.convolution_gradient_layer2(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+                gradient_inputs.A, self.A, scratch.A)
+            
 
     def convolve_and_pool_replace(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch):
         # asserts that check number of dimensions, sizes, etc
