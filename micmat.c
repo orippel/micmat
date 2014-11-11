@@ -5105,6 +5105,43 @@ void convolve(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, fl
 
 }
 
+void gram_schmidt(int N, int C, float *restrict A, float *restrict SCRATCH){
+
+    #pragma offload target(mic:MIC_DEV) \ 
+    in(A:length(0) REUSE) \ 
+    in(SCRATCH:length(0) REUSE)
+    {
+
+        SCRATCH[0 : N*C] = A[0 : N*C];
+        float *projection = SCRATCH + N*C;
+
+        // orthogonalize vectors
+        for (int n = 1; n < N; n++){
+            float *current_u = A + n*C;
+            float *current_v = SCRATCH + n*C;
+
+            for (int nn = 0; nn < n; nn++){
+                // compute projection
+                float *previous_u = A + nn*C;
+                float projection_coeff = __sec_reduce_add(previous_u[0 : C] * current_v[0 : C]) / 
+                                         __sec_reduce_add(previous_u[0 : C] * previous_u[0 : C]);
+                projection[0 : C] =  projection_coeff * previous_u[0 : C];
+
+                // subtract projection
+                current_u[0 : C] -= projection[0 : C];
+            }
+        }
+
+        // normalize vectors
+        for (int n = 0; n < N; n++){
+            float *current_u = A + n*C;
+
+            float norm2_u = pow(__sec_reduce_add(current_u[0 : C] * current_u[0 : C]), 0.5);
+            current_u[0 : C] /= norm2_u;
+        }
+    }
+}
+
 void check_mic_status(){
     _Offload_status mic_status;
     OFFLOAD_STATUS_INIT(mic_status);

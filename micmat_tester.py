@@ -25,7 +25,7 @@ def main():
     examine_local = False
 
     time_and_dont_test = True
-    time_and_dont_test_grad = False
+    time_and_dont_test_grad = True
     test_gradient = True
     offload = True
     
@@ -36,14 +36,14 @@ def main():
             C_block = 1
 
             N_block_grad = None
-            C_block_grad = 3
+            C_block_grad = 16
             H_arg_block_grad = 1
             W_arg_block_grad = None # will set to be output_W
             Y_block_grad = 1
 
             N = 128 # faster if N is a multiple of 236 (stems from needing N/N_block*K/K_block to be divisible by 236)
             K = 64
-            c = 3
+            c = 64
             H = 13
             W = 13
             X = 5
@@ -111,16 +111,6 @@ def main():
     scratch.fill_zeros()
 
     C.check_mic_status()
-
-    # A = C.MICMat((N, K, H, W)).offload_mic().fill_randn(stream, 0., 1.)
-
-    # B = A.deepcopy()
-    # B.permute_dimensions((0, 2, 3, 1), scratch)
-    
-    # A_np = A.ndarray()
-    # B_np = np.transpose(A_np, (0, 2, 3, 1))
-
-    # print np.abs(B_np - B.ndarray()).sum()
 
     # C.initialize_locks()
     if examine_convolution:

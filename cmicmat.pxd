@@ -229,6 +229,8 @@ cdef extern from "micmat.h":
 
     # int *convolve_and_pool_layer2(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int pool_radius, int stride, int *ARGMAXS, int argmaxs_fixed, int offloaded)
 
+    void gram_schmidt(int N, int C, float *A, float *SCRATCH)
+
     void check_mic_status()
 
     void ping_each_core()

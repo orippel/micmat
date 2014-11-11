@@ -1036,6 +1036,12 @@ cdef class MICMat:
 
         return self
 
+    def gram_schmidt(self, MICMat scratch):
+        assert self.shape[0] <= np.prod(self.shape[1:]), 'Cannot orthonormalize matrix. Number of vectors greater than matrix rank.'
+        cmicmat.gram_schmidt(self.shape[0], np.product(self.shape[1:]), self.A, scratch.A)
+
+        return self
+
     def dot(self, MICMat V, *args):
         cdef MICMat S
         cdef int T_A = False
@@ -1328,7 +1334,14 @@ cdef class MICMat:
             if AXIS == 1:
                 I.shape = (self.ROWS, 1)
         
-        I.A_int = cmicmat.max_axis(self.ROWS, self.COLS, self.A, AXIS)
+        if self.ndim == 2:
+            I.A_int = cmicmat.max_axis(self.ROWS, self.COLS, self.A, AXIS)
+
+        else:
+            raise NameError('Currently cannot compute max/min for tensor.')
+            # assert AXIS == 2
+            # I.A_int = cmicmat.max_axis(self.size, 1, self.A, AXIS)            
+
         I.dtype = 1
         I.offloaded = self.offloaded
         cdef MICMat S = self.slice_inds(I)
