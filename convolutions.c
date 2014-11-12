@@ -1455,51 +1455,51 @@ void get_argmaxs(int N, int C, int H, int W, float *restrict INPUTS, float *rest
 //     } // pragma offload
 // }
 
-void permute_dimensions_int(int D1, int D2, int D3, int D4, int perm1, int perm2, int perm3, int perm4, int *restrict TENSOR, float *restrict SCRATCH){
+// void permute_dimensions_int(int D1, int D2, int D3, int D4, int perm1, int perm2, int perm3, int perm4, int *restrict TENSOR, float *restrict SCRATCH){
 
-    #pragma offload target(mic:MIC_DEV) \ 
-        in(TENSOR:length(0) REUSE) \
-        in(SCRATCH:length(0) REUSE)
-    {   
-        int i1, i2, i3, i4;
-        SCRATCH[0 : D1*D2*D3*D4] = (float) TENSOR[0 : D1*D2*D3*D4];
+//     #pragma offload target(mic:MIC_DEV) \ 
+//         in(TENSOR:length(0) REUSE) \
+//         in(SCRATCH:length(0) REUSE)
+//     {   
+//         int i1, i2, i3, i4;
+//         SCRATCH[0 : D1*D2*D3*D4] = (float) TENSOR[0 : D1*D2*D3*D4];
 
-        int dimensions[4] = {D1, D2, D3, D4};
-        int P1 = dimensions[perm1];
-        int P2 = dimensions[perm2];
-        int P3 = dimensions[perm3];
-        int P4 = dimensions[perm4];
+//         int dimensions[4] = {D1, D2, D3, D4};
+//         int P1 = dimensions[perm1];
+//         int P2 = dimensions[perm2];
+//         int P3 = dimensions[perm3];
+//         int P4 = dimensions[perm4];
 
-        // printf("(%d, %d, %d, %d)\n (%d, %d, %d, %d)\n", D1, D2, D3, D4, P1, P2, P3, P4);
+//         // printf("(%d, %d, %d, %d)\n (%d, %d, %d, %d)\n", D1, D2, D3, D4, P1, P2, P3, P4);
 
-        #pragma omp parallel for \
-            schedule(dynamic) \
-            default(none) \
-            private(i1, i2, i3, i4) \
-            shared(TENSOR, SCRATCH, D1, D2, D3, D4, P1, P2, P3, P4, perm1, perm2, perm3, perm4)
+//         #pragma omp parallel for \
+//             schedule(dynamic) \
+//             default(none) \
+//             private(i1, i2, i3, i4) \
+//             shared(TENSOR, SCRATCH, D1, D2, D3, D4, P1, P2, P3, P4, perm1, perm2, perm3, perm4)
 
-        for (int i1i2 = 0; i1i2 < D1*D2; i1i2++){
-            i1 = i1i2 / D2;
-            i2 = md(i1i2, D2);
+//         for (int i1i2 = 0; i1i2 < D1*D2; i1i2++){
+//             i1 = i1i2 / D2;
+//             i2 = md(i1i2, D2);
 
-            int indices[4];
-            for (i3 = 0; i3 < D3; i3++){
-                for (i4 = 0; i4 < D4; i4++){
-                    indices[0] = i1;
-                    indices[1] = i2;
-                    indices[2] = i3;
-                    indices[3] = i4;
-                    int p1 = indices[perm1];
-                    int p2 = indices[perm2];
-                    int p3 = indices[perm3];
-                    int p4 = indices[perm4];
-                    TENSOR[ti(p1, p2, p3, p4, P2, P3, P4)] = (int) SCRATCH[ti(i1, i2, i3, i4, D2, D3, D4)];
-                }
-            }
-        }
+//             int indices[4];
+//             for (i3 = 0; i3 < D3; i3++){
+//                 for (i4 = 0; i4 < D4; i4++){
+//                     indices[0] = i1;
+//                     indices[1] = i2;
+//                     indices[2] = i3;
+//                     indices[3] = i4;
+//                     int p1 = indices[perm1];
+//                     int p2 = indices[perm2];
+//                     int p3 = indices[perm3];
+//                     int p4 = indices[perm4];
+//                     TENSOR[ti(p1, p2, p3, p4, P2, P3, P4)] = (int) SCRATCH[ti(i1, i2, i3, i4, D2, D3, D4)];
+//                 }
+//             }
+//         }
 
-    } // pragma offload
-}
+//     } // pragma offload
+// }
 
 void permute_dimensions(int D1, int D2, int D3, int D4, int perm1, int perm2, int perm3, int perm4, float *restrict TENSOR, float *restrict SCRATCH){
 
@@ -1584,88 +1584,87 @@ void permute_dimensions(int D1, int D2, int D3, int D4, int perm1, int perm2, in
     } // pragma offload
 }
 
-// void permute_dimensions_int(int D1, int D2, int D3, int D4, int perm1, int perm2, int perm3, int perm4, int *restrict TENSOR, float *restrict SCRATCH){
+void permute_dimensions_int(int D1, int D2, int D3, int D4, int perm1, int perm2, int perm3, int perm4, int *restrict TENSOR, float *restrict SCRATCH){
 
-//     #pragma offload target(mic:MIC_DEV) \ 
-//         in(TENSOR:length(0) REUSE) \
-//         in(SCRATCH:length(0) REUSE)
-//     {   
-//         int i1, i2, i3, i4;
+    #pragma offload target(mic:MIC_DEV) \ 
+        in(TENSOR:length(0) REUSE) \
+        in(SCRATCH:length(0) REUSE)
+    {   
+        int i1, i2, i3, i4;
 
-//     int D = D1*D2*D3*D4;
-//     // copy D elements from TENSOR to SCRATCH
-//     int num_cache_lines_64 = D/64;  
-//     int D_aligned = num_cache_lines_64*64;
-//     int D_remaining = D - D_aligned;
+    int D = D1*D2*D3*D4;
+    // copy D elements from TENSOR to SCRATCH
+    int num_cache_lines_64 = D/64;  
+    int D_aligned = num_cache_lines_64*64;
+    int D_remaining = D - D_aligned;
+    float * restrict TENSOR_FLOAT = (float *)(TENSOR);
 
-//         #pragma omp parallel for schedule(static,16) default(none) shared(D, num_cache_lines_64, TENSOR, SCRATCH)
-//     for(int d = 0; d < num_cache_lines_64; d++)
-//     {
-//             float *restrict tensor_pointer = (float *)(TENSOR) + d*64;
-//             float *restrict scratch_pointer = SCRATCH + d*64;
-//         #if defined __MIC__
-//                 __m512 tens_1 = _mm512_extload_ps(tensor_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-//                 __m512 tens_2 = _mm512_extload_ps(tensor_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-//                 __m512 tens_3 = _mm512_extload_ps(tensor_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-//                 __m512 tens_4 = _mm512_extload_ps(tensor_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-//         _mm_prefetch((char *)(tensor_pointer + 64     ), _MM_HINT_T0);
-//         _mm_prefetch((char *)(tensor_pointer + 64 + 16), _MM_HINT_T0);
-//         _mm_prefetch((char *)(tensor_pointer + 64 + 32), _MM_HINT_T0);
-//         _mm_prefetch((char *)(tensor_pointer + 64 + 48), _MM_HINT_T0);
-//         _mm_prefetch((char *)(tensor_pointer + 256), _MM_HINT_T1);
-//         _mm_prefetch((char *)(tensor_pointer + 256 + 16), _MM_HINT_T1);
-//         _mm_prefetch((char *)(tensor_pointer + 256 + 32), _MM_HINT_T1);
-//         _mm_prefetch((char *)(tensor_pointer + 256 + 48), _MM_HINT_T1);
-//                 _mm512_storenrngo_ps((float *)(scratch_pointer),      tens_1);
-//                 _mm512_storenrngo_ps((float *)(scratch_pointer + 16), tens_2);
-//                 _mm512_storenrngo_ps((float *)(scratch_pointer + 32), tens_3);
-//                 _mm512_storenrngo_ps((float *)(scratch_pointer + 48), tens_4);
-//         #endif
-//     }
-//     //copy remaining unaligned elements
-//     SCRATCH[D_aligned : D_remaining] = TENSOR[D_aligned : D_remaining];
+        #pragma omp parallel for schedule(static,16) default(none) shared(D, num_cache_lines_64, TENSOR_FLOAT, SCRATCH)
+    for(int d = 0; d < num_cache_lines_64; d++)
+    {
+            float *restrict tensor_pointer = (float *)(TENSOR_FLOAT) + d*64;
+            float *restrict scratch_pointer = SCRATCH + d*64;
+        #if defined __MIC__
+                __m512 tens_1 = _mm512_extload_ps(tensor_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 tens_2 = _mm512_extload_ps(tensor_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 tens_3 = _mm512_extload_ps(tensor_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 tens_4 = _mm512_extload_ps(tensor_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+        _mm_prefetch((char *)(tensor_pointer + 64     ), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 64 + 16), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 64 + 32), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 64 + 48), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 256), _MM_HINT_T1);
+        _mm_prefetch((char *)(tensor_pointer + 256 + 16), _MM_HINT_T1);
+        _mm_prefetch((char *)(tensor_pointer + 256 + 32), _MM_HINT_T1);
+        _mm_prefetch((char *)(tensor_pointer + 256 + 48), _MM_HINT_T1);
+                _mm512_storenrngo_ps((float *)(scratch_pointer),      tens_1);
+                _mm512_storenrngo_ps((float *)(scratch_pointer + 16), tens_2);
+                _mm512_storenrngo_ps((float *)(scratch_pointer + 32), tens_3);
+                _mm512_storenrngo_ps((float *)(scratch_pointer + 48), tens_4);
+        #endif
+    }
+    //copy remaining unaligned elements
+    SCRATCH[D_aligned : D_remaining] = TENSOR_FLOAT[D_aligned : D_remaining];
 
-//         //SCRATCH[0 : D1*D2*D3*D4] = TENSOR[0 : D1*D2*D3*D4];
+        int dimensions[4] = {D1, D2, D3, D4};
+        int P1 = dimensions[perm1];
+        int P2 = dimensions[perm2];
+        int P3 = dimensions[perm3];
+        int P4 = dimensions[perm4];
+    __declspec(aligned(64)) int inverse_perm[4];
+    inverse_perm[perm1] = 0;
+    inverse_perm[perm2] = 1;
+    inverse_perm[perm3] = 2;
+    inverse_perm[perm4] = 3;
 
-//         int dimensions[4] = {D1, D2, D3, D4};
-//         int P1 = dimensions[perm1];
-//         int P2 = dimensions[perm2];
-//         int P3 = dimensions[perm3];
-//         int P4 = dimensions[perm4];
-//     __declspec(aligned(64)) int inverse_perm[4];
-//     inverse_perm[perm1] = 0;
-//     inverse_perm[perm2] = 1;
-//     inverse_perm[perm3] = 2;
-//     inverse_perm[perm4] = 3;
+        //printf("(%d, %d, %d, %d) (%d, %d, %d, %d) \n", D1, D2, D3, D4, P1, P2, P3, P4); 
 
-//         //printf("(%d, %d, %d, %d) (%d, %d, %d, %d) \n", D1, D2, D3, D4, P1, P2, P3, P4); 
+        #pragma omp parallel for \
+            schedule(static,8) \
+            default(none) \
+            private(i1, i2, i3, i4) \
+            shared(TENSOR_FLOAT, SCRATCH, D1, D2, D3, D4, P1, P2, P3, P4, perm1, perm2, perm3, perm4, inverse_perm)
 
-//         #pragma omp parallel for \
-//             schedule(static,8) \
-//             default(none) \
-//             private(i1, i2, i3, i4) \
-//             shared(TENSOR, SCRATCH, D1, D2, D3, D4, P1, P2, P3, P4, perm1, perm2, perm3, perm4, inverse_perm)
+        for (int i1i2 = 0; i1i2 < D1*D2; i1i2++){
+            i1 = i1i2 / D2;
+            i2 = md(i1i2, D2);
+        float * SCRATCH_base = SCRATCH + i1*D2*D3*D4 + i2*D3*D4;
 
-//         for (int i1i2 = 0; i1i2 < D1*D2; i1i2++){
-//             i1 = i1i2 / D2;
-//             i2 = md(i1i2, D2);
-//         float * SCRATCH_base = SCRATCH + i1*D2*D3*D4 + i2*D3*D4;
+            __declspec(aligned(64)) int p[4];
+        p[inverse_perm[0]] = i1;
+        p[inverse_perm[1]] = i2;
 
-//             __declspec(aligned(64)) int p[4];
-//         p[inverse_perm[0]] = i1;
-//         p[inverse_perm[1]] = i2;
-
-//             for (i3 = 0; i3 < D3; i3++){
-//             p[inverse_perm[2]] = i3;
-//             float * SCRATCH_ptr = SCRATCH_base + i3*D4;
-//                 for (i4 = 0; i4 < D4; i4++){
-//                 p[inverse_perm[3]] = i4;
-//                     TENSOR[ti(p[0], p[1], p[2], p[3], P2, P3, P4)] = (int) SCRATCH_ptr[i4];
-//                 }
-//             }
-//         }
-//     } // pragma offload
-// }
+            for (i3 = 0; i3 < D3; i3++){
+            p[inverse_perm[2]] = i3;
+            float * SCRATCH_ptr = SCRATCH_base + i3*D4;
+                for (i4 = 0; i4 < D4; i4++){
+                p[inverse_perm[3]] = i4;
+                    TENSOR_FLOAT[ti(p[0], p[1], p[2], p[3], P2, P3, P4)] = SCRATCH_ptr[i4];
+                }
+            }
+        }
+    } // pragma offload
+}
 
 void transpose_replace(int N, int C, float *restrict TENSOR, float *restrict SCRATCH){
 
@@ -1720,59 +1719,60 @@ void transpose_replace(int N, int C, float *restrict TENSOR, float *restrict SCR
     } // pragma offload
 }
 
-// void transpose_replace_int(int N, int C, int *restrict TENSOR, float *restrict SCRATCH){
+void transpose_replace_int(int N, int C, int *restrict TENSOR, float *restrict SCRATCH){
 
-//     #pragma offload target(mic:MIC_DEV) \ 
-//         in(TENSOR:length(0) REUSE) \
-//         in(SCRATCH:length(0) REUSE)
-//     {   
+    #pragma offload target(mic:MIC_DEV) \ 
+        in(TENSOR:length(0) REUSE) \
+        in(SCRATCH:length(0) REUSE)
+    {   
 
-//         int n, c;
-//     int D = N*C;
-//     int num_cache_lines_64 = D/64;  
-//     int D_aligned = num_cache_lines_64*64;
-//     int D_remaining = D - D_aligned;
+        int n, c;
+    int D = N*C;
+    int num_cache_lines_64 = D/64;  
+    int D_aligned = num_cache_lines_64*64;
+    int D_remaining = D - D_aligned;
+    float * restrict TENSOR_FLOAT = (float *)(TENSOR);
 
-//         #pragma omp parallel for schedule(static,16) default(none) shared(D, num_cache_lines_64, TENSOR, SCRATCH)
-//     for(int d = 0; d < num_cache_lines_64; d++)
-//     {
-//             float *restrict tensor_pointer = (float *)(TENSOR) + d*64;
-//             float *restrict scratch_pointer = SCRATCH + d*64;
-//         #if defined __MIC__
-//                 __m512 tens_1 = _mm512_extload_ps(tensor_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-//                 __m512 tens_2 = _mm512_extload_ps(tensor_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-//                 __m512 tens_3 = _mm512_extload_ps(tensor_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-//                 __m512 tens_4 = _mm512_extload_ps(tensor_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-//         _mm_prefetch((char *)(tensor_pointer + 64     ), _MM_HINT_T0);
-//         _mm_prefetch((char *)(tensor_pointer + 64 + 16), _MM_HINT_T0);
-//         _mm_prefetch((char *)(tensor_pointer + 64 + 32), _MM_HINT_T0);
-//         _mm_prefetch((char *)(tensor_pointer + 64 + 48), _MM_HINT_T0);
-//         _mm_prefetch((char *)(tensor_pointer + 256), _MM_HINT_T1);
-//         _mm_prefetch((char *)(tensor_pointer + 256 + 16), _MM_HINT_T1);
-//         _mm_prefetch((char *)(tensor_pointer + 256 + 32), _MM_HINT_T1);
-//         _mm_prefetch((char *)(tensor_pointer + 256 + 48), _MM_HINT_T1);
-//                 _mm512_storenrngo_ps((float *)(scratch_pointer),      tens_1);
-//                 _mm512_storenrngo_ps((float *)(scratch_pointer + 16), tens_2);
-//                 _mm512_storenrngo_ps((float *)(scratch_pointer + 32), tens_3);
-//                 _mm512_storenrngo_ps((float *)(scratch_pointer + 48), tens_4);
-//         #endif
-//     }
-//     //copy remaining unaligned elements
-//     SCRATCH[D_aligned : D_remaining] = TENSOR[D_aligned : D_remaining];
+        #pragma omp parallel for schedule(static,16) default(none) shared(D, num_cache_lines_64, TENSOR_FLOAT, SCRATCH)
+    for(int d = 0; d < num_cache_lines_64; d++)
+    {
+            float *restrict tensor_pointer = (float *)(TENSOR_FLOAT) + d*64;
+            float *restrict scratch_pointer = SCRATCH + d*64;
+        #if defined __MIC__
+                __m512 tens_1 = _mm512_extload_ps(tensor_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 tens_2 = _mm512_extload_ps(tensor_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 tens_3 = _mm512_extload_ps(tensor_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 tens_4 = _mm512_extload_ps(tensor_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+        _mm_prefetch((char *)(tensor_pointer + 64     ), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 64 + 16), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 64 + 32), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 64 + 48), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 256), _MM_HINT_T1);
+        _mm_prefetch((char *)(tensor_pointer + 256 + 16), _MM_HINT_T1);
+        _mm_prefetch((char *)(tensor_pointer + 256 + 32), _MM_HINT_T1);
+        _mm_prefetch((char *)(tensor_pointer + 256 + 48), _MM_HINT_T1);
+                _mm512_storenrngo_ps((float *)(scratch_pointer),      tens_1);
+                _mm512_storenrngo_ps((float *)(scratch_pointer + 16), tens_2);
+                _mm512_storenrngo_ps((float *)(scratch_pointer + 32), tens_3);
+                _mm512_storenrngo_ps((float *)(scratch_pointer + 48), tens_4);
+        #endif
+    }
+    //copy remaining unaligned elements
+    SCRATCH[D_aligned : D_remaining] = TENSOR_FLOAT[D_aligned : D_remaining];
 
-//     int N_aligned = (N/64)*64;
-//         #pragma omp parallel for schedule(static,16) default(none) private(n, c) shared(N, TENSOR, SCRATCH, C)
-//         for (int nc = 0; nc < C * (N/64); nc++){
-//             int c = nc % C;
-//             int n = nc / C;
-//                 TENSOR[c*N + n*64 : 64] = (int) SCRATCH[c + n*64*C : 64 : C];
-//         }
-//         #pragma omp parallel for schedule(static,16) default(none) private(n, c) shared(N, N_aligned, TENSOR, SCRATCH, C)
-//         for (int c = 0; c < C; c++){
-//             TENSOR[c*N + N_aligned : (N-N_aligned)] = (int) SCRATCH[c + N_aligned*C: (N-N_aligned) : C];
-//         }
-//     } // pragma offload
-// }
+    int N_aligned = (N/64)*64;
+        #pragma omp parallel for schedule(static,16) default(none) private(n, c) shared(N, TENSOR_FLOAT, SCRATCH, C)
+        for (int nc = 0; nc < C * (N/64); nc++){
+            int c = nc % C;
+            int n = nc / C;
+                TENSOR_FLOAT[c*N + n*64 : 64] = SCRATCH[c + n*64*C : 64 : C];
+        }
+        #pragma omp parallel for schedule(static,16) default(none) private(n, c) shared(N, N_aligned, TENSOR_FLOAT, SCRATCH, C)
+        for (int c = 0; c < C; c++){
+            TENSOR_FLOAT[c*N + N_aligned : (N-N_aligned)] = SCRATCH[c + N_aligned*C: (N-N_aligned) : C];
+        }
+    } // pragma offload
+}
 
 // void transpose_replace(int N, int C, float *restrict TENSOR, float *restrict SCRATCH){
 
@@ -1798,29 +1798,29 @@ void transpose_replace(int N, int C, float *restrict TENSOR, float *restrict SCR
 //     } // pragma offload
 // }
 
-void transpose_replace_int(int N, int C, int *restrict TENSOR, float *restrict SCRATCH){
+// void transpose_replace_int(int N, int C, int *restrict TENSOR, float *restrict SCRATCH){
 
-    #pragma offload target(mic:MIC_DEV) \ 
-        in(TENSOR:length(0) REUSE) \
-        in(SCRATCH:length(0) REUSE)
-    {   
+//     #pragma offload target(mic:MIC_DEV) \ 
+//         in(TENSOR:length(0) REUSE) \
+//         in(SCRATCH:length(0) REUSE)
+//     {   
         
-        // mkl_somatcopy('R', 'T', N, C, 1.0, TENSOR, C, SCRATCH, N);
-        int n, c;
-        SCRATCH[0 : N*C] = (float) TENSOR[0 : N*C];
+//         // mkl_somatcopy('R', 'T', N, C, 1.0, TENSOR, C, SCRATCH, N);
+//         int n, c;
+//         SCRATCH[0 : N*C] = (float) TENSOR[0 : N*C];
 
-        #pragma omp parallel for \
-            schedule(dynamic) \
-            default(none) \
-            private(n, c) \
-            shared(N, TENSOR, SCRATCH, C)
+//         #pragma omp parallel for \
+//             schedule(dynamic) \
+//             default(none) \
+//             private(n, c) \
+//             shared(N, TENSOR, SCRATCH, C)
 
-        for (int c = 0; c < C; c++){
-            TENSOR[c*N : N] = (int) SCRATCH[c : N : C];
-        }            
+//         for (int c = 0; c < C; c++){
+//             TENSOR[c*N : N] = (int) SCRATCH[c : N : C];
+//         }            
 
-    } // pragma offload
-}
+//     } // pragma offload
+// }
 
 // [C/C_BLOCK, Y/Y_BLOCK, K, Y_BLOCK, X, C_BLOCK] 
 
