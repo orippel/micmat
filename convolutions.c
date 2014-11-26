@@ -644,6 +644,874 @@ int *convolution_layer2(int N, int C, int H, int W, float *restrict INPUTS, int 
     } // pragma_offload
 }
 
+int *convolution_layer3(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
+    assert(C == C_const3);
+    assert(H == H_const3);
+    assert(W == W_const3);
+    assert(K == K_const3);
+    assert(stride == stride_const3);
+    assert(padding == padding_const3);
+    assert(pooling_radius == pooling_radius_const3);
+    assert(pooling_stride == pooling_stride_const3);
+    assert(X == X_const3);
+    assert(Y == Y_const3);
+    assert(output_H_const3 == (H_const3 + 2*padding_const3 - Y_const3 + 1)/stride_const3);
+    assert(output_W_const3 == (W_const3 + 2*padding_const3 - X_const3 + 1)/stride_const3);
+    assert(pooled_H_const3 == ceil((output_H_const3 - pooling_radius_const3 + 1.f)/pooling_stride_const3));
+    assert(pooled_W_const3 == ceil((output_W_const3 - pooling_radius_const3 + 1.f)/pooling_stride_const3));
+
+    #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(FILTERS:length(0) REUSE) \ 
+    in(OUTPUTS:length(0) REUSE) \
+    in(ARGMAXS:length(0) REUSE) \
+    in(SCRATCH:length(0) REUSE)
+    {
+        int n_block, n, k_block, k, i, j, h, w, c, c_block, y, x;
+        int nk, hw, ij, nkhw;
+
+        // computation of const2ants
+        int XWN = (-X_const3 + W_const3)*N,
+            HYWN = (H_const3-Y_const3)*W_const3*N;        
+
+        #pragma omp parallel for \
+            schedule(dynamic) \
+            default(none) \
+            private(nk, hw, ij, n_block, n, k, k_block, h, w, c, c_block, y, x, i, j) \
+            shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XWN, HYWN)
+        
+        // ~=~=~=~=~=~=~=~= CONVOLUTION ~=~=~=~=~=~=~=~= 
+        for (nk = 0; nk < N/N_BLOCK*K_const3/K_BLOCK; nk++){
+           
+#if K_BLOCK > N_BLOCK
+            k_block = nk / (N/N_BLOCK);
+            k = k_block*K_BLOCK;
+            n_block = md(nk, N/N_BLOCK);
+            n = n_block*N_BLOCK;
+#else 
+            n_block = nk / (K_const3/K_BLOCK);
+            n = n_block*N_BLOCK;
+            k_block = md(nk, K_const3/K_BLOCK);
+            k = k_block*K_BLOCK;
+#endif
+
+            SCRATCH[omp_get_thread_num()*output_H_const3*output_W_const3*N_BLOCK*K_BLOCK : output_H_const3*output_W_const3*N_BLOCK*K_BLOCK] = 0.f;
+
+            for (c_block = 0; c_block < C_const3/C_BLOCK; c_block++){
+                c = c_block*C_BLOCK;
+
+                for (h = 0; h < output_H_const3; h++){
+                    for (w = 0; w < output_W_const3; w++){
+
+#if K_BLOCK > N_BLOCK
+                        float *restrict convolutions = SCRATCH + ti5(omp_get_thread_num(), h, w, 0, 0, output_H_const3, output_W_const3, N_BLOCK, K_BLOCK);
+                        float *restrict convolutions_next = SCRATCH + ti5(omp_get_thread_num(), h, w+1, 0, 0, output_H_const3, output_W_const3, N_BLOCK, K_BLOCK);
+#else
+                        float *restrict convolutions = SCRATCH + ti5(omp_get_thread_num(), h, w, 0, 0, output_H_const3, output_W_const3, K_BLOCK, N_BLOCK);
+                        float *restrict convolutions_next = SCRATCH + ti5(omp_get_thread_num(), h, w+1, 0, 0, output_H_const3, output_W_const3, K_BLOCK, N_BLOCK);
+#endif
+                __assume_aligned(convolutions, 64);
+
+#pragma unroll
+            for(int i = 0; i < (N_BLOCK*K_BLOCK); i+= 16)
+            {
+                _mm_prefetch((char *)(convolutions_next + i), _MM_HINT_ET0);
+            }
+
+                        // if we're not on boundary (i.e not affected by padding)
+                        if (w - padding_const3 >= 0 &&
+                            h - padding_const3 >= 0 &&
+                            output_W_const3 - 1 - w >= padding_const3  &&
+                            output_H_const3 - 1 - h >= padding_const3){
+
+#if 1 && defined __MIC__
+                // The following loads the a N_BLOCK*K_BLOCK region of SCRATCH space into SIMD registers
+                LOAD_OUTPUTS;
+#endif
+
+#pragma unroll (C_BLOCK)
+                            for (int cc = 0; cc < C_BLOCK; cc++){
+                            float *restrict inputs_pointer = INPUTS + ti5(n_block, c+cc, h - padding_const3, w - padding_const3, 0, C_const3, H_const3, W_const3, N_BLOCK);
+                        float *restrict filters_pointer = FILTERS + ti5(k_block, c+cc, 0, 0, 0, C_const3, Y_const3, X_const3, K_BLOCK);
+                             
+                // The idea is to ensure that the working space of INPUTS = [N_BLOCK * C_BLOCK * W * Y] is small enough to fit in L2 so that we can reuse across [H,W] loops; if not we have a problem; CHECK if performance is low.  
+                // The idea is to ensure that the working space of FILTERS = [K_BLOCK * C_BLOCK * X * Y] is small enough to fit in L2 so that we can reuse across [H,W] loops; if not we have a problem; CHECK if performance is low.  
+                // TODO: introduce L2 prefetch for INPUTS + ti5(n_block, c, h - padding_const3 + Y_const3, w - padding_const3 + X_const3 + 2 that may help the above problem if it exists
+                            for (y = 0; y < Y_const3; ++y){                            
+                // This prefetch is only for INPUTS order [N, C, H, W]    
+                //_mm_prefetch((char *)(inputs_pointer + W_const3*N_BLOCK), _MM_HINT_T0);
+                                for (x = 0; x < X_const3; ++x)
+                {
+#if 1 && defined __MIC__
+                    // This assumes the filters are already in L2...
+                    PREFETCH_INPUTS;
+                    PREFETCH_FILTERS;
+                    LOAD_INPUTS;
+                    LOAD_FILTERS;
+                    COMPUTE_OUTPUTS;
+#endif
+                    filters_pointer += K_BLOCK;
+                                    inputs_pointer += N_BLOCK;
+                                } // x
+                                inputs_pointer += (-X_const3 + W_const3)*N_BLOCK;
+                            } // y
+                } // cc
+#if 1 && defined __MIC__
+                STORE_OUTPUTS;
+#endif
+
+                        }
+
+                        else{
+#if 1 && defined __MIC__
+                LOAD_OUTPUTS;
+#endif
+                            for (int cc = 0; cc < C_BLOCK; cc++){
+                            float *restrict inputs_pointer = INPUTS + ti5(n_block, c+cc, mx(mn(h-padding_const3, H_const3-1), 0), mx(mn(w-padding_const3, W_const3-1), 0), 0, C_const3, H_const3, W_const3, N_BLOCK);
+                        float *restrict filters_pointer = FILTERS + ti5(k_block, c+cc, 0, 0, 0, C_const3, Y_const3, X_const3, K_BLOCK);
+                            
+                int min_x = mx(0, (padding_const3 - w)); 
+                int max_x = mn(X_const3, (W_const3 + padding_const3 - w)); 
+                int min_y = mx(0, (padding_const3 - h)); 
+                int max_y = mn(Y_const3, (H_const3 + padding_const3 - h)); 
+
+                filters_pointer += min_y*X_const3*K_BLOCK;
+                //TODO: I am fairly sure more prefetches are required for FILTERS here...
+                            for (y = min_y; y < max_y; ++y){
+                                float *restrict inputs_pointer_y = inputs_pointer; // start-of-line pointer
+                filters_pointer += min_x*K_BLOCK;
+                // This prefetch is only for INPUTS order [N, C, H, W]    
+                //_mm_prefetch((char *)(inputs_pointer + W_const3*N_BLOCK), _MM_HINT_T0);
+#pragma unroll (X_const3-padding_const3)
+#pragma noprefetch
+                                for (x = min_x; x < max_x; ++x)
+                {
+#if 1 && defined __MIC__
+                    // This assumes the filters are already in L2...
+                    PREFETCH_INPUTS;
+                    PREFETCH_FILTERS;
+                    LOAD_INPUTS;
+                    LOAD_FILTERS;
+                    COMPUTE_OUTPUTS;
+#endif
+                                    filters_pointer += K_BLOCK;
+                                    inputs_pointer += N_BLOCK;
+                } // x
+                filters_pointer += (X_const3 - max_x)*K_BLOCK;
+                                inputs_pointer = inputs_pointer_y + W_const3*N_BLOCK; 
+                            } //y 
+                filters_pointer += (Y_const3 - max_y)*X_const3*K_BLOCK;
+                } //cc
+#if 1 && defined __MIC__
+                STORE_OUTPUTS;
+#endif
+
+                        } // if-else
+                    } // w
+                } // h
+            } // c_block
+
+
+            // ~=~=~=~=~=~=~=~= POOLING ~=~=~=~=~=~=~=~= 
+            for (h = 0; h < pooled_H_const3; h++){
+                for (w = 0; w < pooled_W_const3; w++){
+
+                    int h_output = h*pooling_stride_const3;
+                    int w_output = w*pooling_stride_const3;
+
+                    int window_width = pooling_radius_const3 - mx(w_output + pooling_radius_const3 - output_W_const3, 0);
+                    int window_height = pooling_radius_const3 - mx(h_output + pooling_radius_const3 - output_H_const3, 0);
+                    
+                    for (int kk = 0; kk < K_BLOCK; kk++){
+#if K_BLOCK > N_BLOCK 
+                        float *restrict outputs_pointer = SCRATCH + ti5(omp_get_thread_num(), h_output, w_output, 0, kk, output_H_const3, output_W_const3, N_BLOCK, K_BLOCK);
+#else
+                        float *restrict outputs_pointer = SCRATCH + ti5(omp_get_thread_num(), h_output, w_output, kk, 0, output_H_const3, output_W_const3, K_BLOCK, N_BLOCK);
+#endif
+                        int *restrict argmaxs_pointer = ARGMAXS + ti5(n_block, k + kk, h, w, 0, K_const3, pooled_H_const3, pooled_W_const3, N_BLOCK);
+                        float *restrict pooled_outputs_pointer = OUTPUTS + ti5(n_block, k + kk, h, w, 0, K_const3, pooled_H_const3, pooled_W_const3, N_BLOCK);
+                        pooled_outputs_pointer[0 : N_BLOCK] = -1.0e6;
+
+                        int outputs_index = h_output*output_W_const3 + w_output;
+                        for (y = 0; y < window_height; y++){
+                            for (x = 0; x < window_width; x++){
+#if K_BLOCK > N_BLOCK
+                                if (outputs_pointer[0 : N_BLOCK : K_BLOCK] > pooled_outputs_pointer[0 : N_BLOCK]){
+                                    pooled_outputs_pointer[0 : N_BLOCK] = outputs_pointer[0 : N_BLOCK : K_BLOCK];
+                                    argmaxs_pointer[0 : N_BLOCK] = outputs_index;
+                                }
+#else
+                                if (outputs_pointer[0 : N_BLOCK] > pooled_outputs_pointer[0 : N_BLOCK]){
+                                    pooled_outputs_pointer[0 : N_BLOCK] = outputs_pointer[0 : N_BLOCK];
+                                    argmaxs_pointer[0 : N_BLOCK] = outputs_index;
+                                }
+#endif
+                                outputs_index++;
+                                outputs_pointer += K_BLOCK*N_BLOCK;
+                            }
+                            outputs_index += output_W_const3 - window_width;
+                            outputs_pointer += (output_W_const3 - window_width)*K_BLOCK*N_BLOCK;
+                        }
+                    }
+
+                }
+            }
+        } //nk
+
+    } // pragma_offload
+}
+
+int *convolution_layer4(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
+    assert(C == C_const4);
+    assert(H == H_const4);
+    assert(W == W_const4);
+    assert(K == K_const4);
+    assert(stride == stride_const4);
+    assert(padding == padding_const4);
+    assert(pooling_radius == pooling_radius_const4);
+    assert(pooling_stride == pooling_stride_const4);
+    assert(X == X_const4);
+    assert(Y == Y_const4);
+    assert(output_H_const4 == (H_const4 + 2*padding_const4 - Y_const4 + 1)/stride_const4);
+    assert(output_W_const4 == (W_const4 + 2*padding_const4 - X_const4 + 1)/stride_const4);
+    assert(pooled_H_const4 == ceil((output_H_const4 - pooling_radius_const4 + 1.f)/pooling_stride_const4));
+    assert(pooled_W_const4 == ceil((output_W_const4 - pooling_radius_const4 + 1.f)/pooling_stride_const4));
+
+    #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(FILTERS:length(0) REUSE) \ 
+    in(OUTPUTS:length(0) REUSE) \
+    in(ARGMAXS:length(0) REUSE) \
+    in(SCRATCH:length(0) REUSE)
+    {
+        int n_block, n, k_block, k, i, j, h, w, c, c_block, y, x;
+        int nk, hw, ij, nkhw;
+
+        // computation of const2ants
+        int XWN = (-X_const4 + W_const4)*N,
+            HYWN = (H_const4-Y_const4)*W_const4*N;        
+
+        #pragma omp parallel for \
+            schedule(dynamic) \
+            default(none) \
+            private(nk, hw, ij, n_block, n, k, k_block, h, w, c, c_block, y, x, i, j) \
+            shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XWN, HYWN)
+        
+        // ~=~=~=~=~=~=~=~= CONVOLUTION ~=~=~=~=~=~=~=~= 
+        for (nk = 0; nk < N/N_BLOCK*K_const4/K_BLOCK; nk++){
+           
+#if K_BLOCK > N_BLOCK
+            k_block = nk / (N/N_BLOCK);
+            k = k_block*K_BLOCK;
+            n_block = md(nk, N/N_BLOCK);
+            n = n_block*N_BLOCK;
+#else 
+            n_block = nk / (K_const4/K_BLOCK);
+            n = n_block*N_BLOCK;
+            k_block = md(nk, K_const4/K_BLOCK);
+            k = k_block*K_BLOCK;
+#endif
+
+            SCRATCH[omp_get_thread_num()*output_H_const4*output_W_const4*N_BLOCK*K_BLOCK : output_H_const4*output_W_const4*N_BLOCK*K_BLOCK] = 0.f;
+
+            for (c_block = 0; c_block < C_const4/C_BLOCK; c_block++){
+                c = c_block*C_BLOCK;
+
+                for (h = 0; h < output_H_const4; h++){
+                    for (w = 0; w < output_W_const4; w++){
+
+#if K_BLOCK > N_BLOCK
+                        float *restrict convolutions = SCRATCH + ti5(omp_get_thread_num(), h, w, 0, 0, output_H_const4, output_W_const4, N_BLOCK, K_BLOCK);
+                        float *restrict convolutions_next = SCRATCH + ti5(omp_get_thread_num(), h, w+1, 0, 0, output_H_const4, output_W_const4, N_BLOCK, K_BLOCK);
+#else
+                        float *restrict convolutions = SCRATCH + ti5(omp_get_thread_num(), h, w, 0, 0, output_H_const4, output_W_const4, K_BLOCK, N_BLOCK);
+                        float *restrict convolutions_next = SCRATCH + ti5(omp_get_thread_num(), h, w+1, 0, 0, output_H_const4, output_W_const4, K_BLOCK, N_BLOCK);
+#endif
+                __assume_aligned(convolutions, 64);
+
+#pragma unroll
+            for(int i = 0; i < (N_BLOCK*K_BLOCK); i+= 16)
+            {
+                _mm_prefetch((char *)(convolutions_next + i), _MM_HINT_ET0);
+            }
+
+                        // if we're not on boundary (i.e not affected by padding)
+                        if (w - padding_const4 >= 0 &&
+                            h - padding_const4 >= 0 &&
+                            output_W_const4 - 1 - w >= padding_const4  &&
+                            output_H_const4 - 1 - h >= padding_const4){
+
+#if 1 && defined __MIC__
+                // The following loads the a N_BLOCK*K_BLOCK region of SCRATCH space into SIMD registers
+                LOAD_OUTPUTS;
+#endif
+
+#pragma unroll (C_BLOCK)
+                            for (int cc = 0; cc < C_BLOCK; cc++){
+                            float *restrict inputs_pointer = INPUTS + ti5(n_block, c+cc, h - padding_const4, w - padding_const4, 0, C_const4, H_const4, W_const4, N_BLOCK);
+                        float *restrict filters_pointer = FILTERS + ti5(k_block, c+cc, 0, 0, 0, C_const4, Y_const4, X_const4, K_BLOCK);
+                             
+                // The idea is to ensure that the working space of INPUTS = [N_BLOCK * C_BLOCK * W * Y] is small enough to fit in L2 so that we can reuse across [H,W] loops; if not we have a problem; CHECK if performance is low.  
+                // The idea is to ensure that the working space of FILTERS = [K_BLOCK * C_BLOCK * X * Y] is small enough to fit in L2 so that we can reuse across [H,W] loops; if not we have a problem; CHECK if performance is low.  
+                // TODO: introduce L2 prefetch for INPUTS + ti5(n_block, c, h - padding_const4 + Y_const4, w - padding_const4 + X_const4 + 2 that may help the above problem if it exists
+                            for (y = 0; y < Y_const4; ++y){                            
+                // This prefetch is only for INPUTS order [N, C, H, W]    
+                //_mm_prefetch((char *)(inputs_pointer + W_const4*N_BLOCK), _MM_HINT_T0);
+                                for (x = 0; x < X_const4; ++x)
+                {
+#if 1 && defined __MIC__
+                    // This assumes the filters are already in L2...
+                    PREFETCH_INPUTS;
+                    PREFETCH_FILTERS;
+                    LOAD_INPUTS;
+                    LOAD_FILTERS;
+                    COMPUTE_OUTPUTS;
+#endif
+                    filters_pointer += K_BLOCK;
+                                    inputs_pointer += N_BLOCK;
+                                } // x
+                                inputs_pointer += (-X_const4 + W_const4)*N_BLOCK;
+                            } // y
+                } // cc
+#if 1 && defined __MIC__
+                STORE_OUTPUTS;
+#endif
+
+                        }
+
+                        else{
+#if 1 && defined __MIC__
+                LOAD_OUTPUTS;
+#endif
+                            for (int cc = 0; cc < C_BLOCK; cc++){
+                            float *restrict inputs_pointer = INPUTS + ti5(n_block, c+cc, mx(mn(h-padding_const4, H_const4-1), 0), mx(mn(w-padding_const4, W_const4-1), 0), 0, C_const4, H_const4, W_const4, N_BLOCK);
+                        float *restrict filters_pointer = FILTERS + ti5(k_block, c+cc, 0, 0, 0, C_const4, Y_const4, X_const4, K_BLOCK);
+                            
+                int min_x = mx(0, (padding_const4 - w)); 
+                int max_x = mn(X_const4, (W_const4 + padding_const4 - w)); 
+                int min_y = mx(0, (padding_const4 - h)); 
+                int max_y = mn(Y_const4, (H_const4 + padding_const4 - h)); 
+
+                filters_pointer += min_y*X_const4*K_BLOCK;
+                //TODO: I am fairly sure more prefetches are required for FILTERS here...
+                            for (y = min_y; y < max_y; ++y){
+                                float *restrict inputs_pointer_y = inputs_pointer; // start-of-line pointer
+                filters_pointer += min_x*K_BLOCK;
+                // This prefetch is only for INPUTS order [N, C, H, W]    
+                //_mm_prefetch((char *)(inputs_pointer + W_const4*N_BLOCK), _MM_HINT_T0);
+#pragma unroll (X_const4-padding_const4)
+#pragma noprefetch
+                                for (x = min_x; x < max_x; ++x)
+                {
+#if 1 && defined __MIC__
+                    // This assumes the filters are already in L2...
+                    PREFETCH_INPUTS;
+                    PREFETCH_FILTERS;
+                    LOAD_INPUTS;
+                    LOAD_FILTERS;
+                    COMPUTE_OUTPUTS;
+#endif
+                                    filters_pointer += K_BLOCK;
+                                    inputs_pointer += N_BLOCK;
+                } // x
+                filters_pointer += (X_const4 - max_x)*K_BLOCK;
+                                inputs_pointer = inputs_pointer_y + W_const4*N_BLOCK; 
+                            } //y 
+                filters_pointer += (Y_const4 - max_y)*X_const4*K_BLOCK;
+                } //cc
+#if 1 && defined __MIC__
+                STORE_OUTPUTS;
+#endif
+
+                        } // if-else
+                    } // w
+                } // h
+            } // c_block
+
+
+            // ~=~=~=~=~=~=~=~= POOLING ~=~=~=~=~=~=~=~= 
+            for (h = 0; h < pooled_H_const4; h++){
+                for (w = 0; w < pooled_W_const4; w++){
+
+                    int h_output = h*pooling_stride_const4;
+                    int w_output = w*pooling_stride_const4;
+
+                    int window_width = pooling_radius_const4 - mx(w_output + pooling_radius_const4 - output_W_const4, 0);
+                    int window_height = pooling_radius_const4 - mx(h_output + pooling_radius_const4 - output_H_const4, 0);
+                    
+                    for (int kk = 0; kk < K_BLOCK; kk++){
+#if K_BLOCK > N_BLOCK 
+                        float *restrict outputs_pointer = SCRATCH + ti5(omp_get_thread_num(), h_output, w_output, 0, kk, output_H_const4, output_W_const4, N_BLOCK, K_BLOCK);
+#else
+                        float *restrict outputs_pointer = SCRATCH + ti5(omp_get_thread_num(), h_output, w_output, kk, 0, output_H_const4, output_W_const4, K_BLOCK, N_BLOCK);
+#endif
+                        int *restrict argmaxs_pointer = ARGMAXS + ti5(n_block, k + kk, h, w, 0, K_const4, pooled_H_const4, pooled_W_const4, N_BLOCK);
+                        float *restrict pooled_outputs_pointer = OUTPUTS + ti5(n_block, k + kk, h, w, 0, K_const4, pooled_H_const4, pooled_W_const4, N_BLOCK);
+                        pooled_outputs_pointer[0 : N_BLOCK] = -1.0e6;
+
+                        int outputs_index = h_output*output_W_const4 + w_output;
+                        for (y = 0; y < window_height; y++){
+                            for (x = 0; x < window_width; x++){
+#if K_BLOCK > N_BLOCK
+                                if (outputs_pointer[0 : N_BLOCK : K_BLOCK] > pooled_outputs_pointer[0 : N_BLOCK]){
+                                    pooled_outputs_pointer[0 : N_BLOCK] = outputs_pointer[0 : N_BLOCK : K_BLOCK];
+                                    argmaxs_pointer[0 : N_BLOCK] = outputs_index;
+                                }
+#else
+                                if (outputs_pointer[0 : N_BLOCK] > pooled_outputs_pointer[0 : N_BLOCK]){
+                                    pooled_outputs_pointer[0 : N_BLOCK] = outputs_pointer[0 : N_BLOCK];
+                                    argmaxs_pointer[0 : N_BLOCK] = outputs_index;
+                                }
+#endif
+                                outputs_index++;
+                                outputs_pointer += K_BLOCK*N_BLOCK;
+                            }
+                            outputs_index += output_W_const4 - window_width;
+                            outputs_pointer += (output_W_const4 - window_width)*K_BLOCK*N_BLOCK;
+                        }
+                    }
+
+                }
+            }
+        } //nk
+
+    } // pragma_offload
+}
+
+int *convolution_layer5(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
+    assert(C == C_const5);
+    assert(H == H_const5);
+    assert(W == W_const5);
+    assert(K == K_const5);
+    assert(stride == stride_const5);
+    assert(padding == padding_const5);
+    assert(pooling_radius == pooling_radius_const5);
+    assert(pooling_stride == pooling_stride_const5);
+    assert(X == X_const5);
+    assert(Y == Y_const5);
+    assert(output_H_const5 == (H_const5 + 2*padding_const5 - Y_const5 + 1)/stride_const5);
+    assert(output_W_const5 == (W_const5 + 2*padding_const5 - X_const5 + 1)/stride_const5);
+    assert(pooled_H_const5 == ceil((output_H_const5 - pooling_radius_const5 + 1.f)/pooling_stride_const5));
+    assert(pooled_W_const5 == ceil((output_W_const5 - pooling_radius_const5 + 1.f)/pooling_stride_const5));
+
+    #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(FILTERS:length(0) REUSE) \ 
+    in(OUTPUTS:length(0) REUSE) \
+    in(ARGMAXS:length(0) REUSE) \
+    in(SCRATCH:length(0) REUSE)
+    {
+        int n_block, n, k_block, k, i, j, h, w, c, c_block, y, x;
+        int nk, hw, ij, nkhw;
+
+        // computation of const2ants
+        int XWN = (-X_const5 + W_const5)*N,
+            HYWN = (H_const5-Y_const5)*W_const5*N;        
+
+        #pragma omp parallel for \
+            schedule(dynamic) \
+            default(none) \
+            private(nk, hw, ij, n_block, n, k, k_block, h, w, c, c_block, y, x, i, j) \
+            shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XWN, HYWN)
+        
+        // ~=~=~=~=~=~=~=~= CONVOLUTION ~=~=~=~=~=~=~=~= 
+        for (nk = 0; nk < N/N_BLOCK*K_const5/K_BLOCK; nk++){
+           
+#if K_BLOCK > N_BLOCK
+            k_block = nk / (N/N_BLOCK);
+            k = k_block*K_BLOCK;
+            n_block = md(nk, N/N_BLOCK);
+            n = n_block*N_BLOCK;
+#else 
+            n_block = nk / (K_const5/K_BLOCK);
+            n = n_block*N_BLOCK;
+            k_block = md(nk, K_const5/K_BLOCK);
+            k = k_block*K_BLOCK;
+#endif
+
+            SCRATCH[omp_get_thread_num()*output_H_const5*output_W_const5*N_BLOCK*K_BLOCK : output_H_const5*output_W_const5*N_BLOCK*K_BLOCK] = 0.f;
+
+            for (c_block = 0; c_block < C_const5/C_BLOCK; c_block++){
+                c = c_block*C_BLOCK;
+
+                for (h = 0; h < output_H_const5; h++){
+                    for (w = 0; w < output_W_const5; w++){
+
+#if K_BLOCK > N_BLOCK
+                        float *restrict convolutions = SCRATCH + ti5(omp_get_thread_num(), h, w, 0, 0, output_H_const5, output_W_const5, N_BLOCK, K_BLOCK);
+                        float *restrict convolutions_next = SCRATCH + ti5(omp_get_thread_num(), h, w+1, 0, 0, output_H_const5, output_W_const5, N_BLOCK, K_BLOCK);
+#else
+                        float *restrict convolutions = SCRATCH + ti5(omp_get_thread_num(), h, w, 0, 0, output_H_const5, output_W_const5, K_BLOCK, N_BLOCK);
+                        float *restrict convolutions_next = SCRATCH + ti5(omp_get_thread_num(), h, w+1, 0, 0, output_H_const5, output_W_const5, K_BLOCK, N_BLOCK);
+#endif
+                __assume_aligned(convolutions, 64);
+
+#pragma unroll
+            for(int i = 0; i < (N_BLOCK*K_BLOCK); i+= 16)
+            {
+                _mm_prefetch((char *)(convolutions_next + i), _MM_HINT_ET0);
+            }
+
+                        // if we're not on boundary (i.e not affected by padding)
+                        if (w - padding_const5 >= 0 &&
+                            h - padding_const5 >= 0 &&
+                            output_W_const5 - 1 - w >= padding_const5  &&
+                            output_H_const5 - 1 - h >= padding_const5){
+
+#if 1 && defined __MIC__
+                // The following loads the a N_BLOCK*K_BLOCK region of SCRATCH space into SIMD registers
+                LOAD_OUTPUTS;
+#endif
+
+#pragma unroll (C_BLOCK)
+                            for (int cc = 0; cc < C_BLOCK; cc++){
+                            float *restrict inputs_pointer = INPUTS + ti5(n_block, c+cc, h - padding_const5, w - padding_const5, 0, C_const5, H_const5, W_const5, N_BLOCK);
+                        float *restrict filters_pointer = FILTERS + ti5(k_block, c+cc, 0, 0, 0, C_const5, Y_const5, X_const5, K_BLOCK);
+                             
+                // The idea is to ensure that the working space of INPUTS = [N_BLOCK * C_BLOCK * W * Y] is small enough to fit in L2 so that we can reuse across [H,W] loops; if not we have a problem; CHECK if performance is low.  
+                // The idea is to ensure that the working space of FILTERS = [K_BLOCK * C_BLOCK * X * Y] is small enough to fit in L2 so that we can reuse across [H,W] loops; if not we have a problem; CHECK if performance is low.  
+                // TODO: introduce L2 prefetch for INPUTS + ti5(n_block, c, h - padding_const5 + Y_const5, w - padding_const5 + X_const5 + 2 that may help the above problem if it exists
+                            for (y = 0; y < Y_const5; ++y){                            
+                // This prefetch is only for INPUTS order [N, C, H, W]    
+                //_mm_prefetch((char *)(inputs_pointer + W_const5*N_BLOCK), _MM_HINT_T0);
+                                for (x = 0; x < X_const5; ++x)
+                {
+#if 1 && defined __MIC__
+                    // This assumes the filters are already in L2...
+                    PREFETCH_INPUTS;
+                    PREFETCH_FILTERS;
+                    LOAD_INPUTS;
+                    LOAD_FILTERS;
+                    COMPUTE_OUTPUTS;
+#endif
+                    filters_pointer += K_BLOCK;
+                                    inputs_pointer += N_BLOCK;
+                                } // x
+                                inputs_pointer += (-X_const5 + W_const5)*N_BLOCK;
+                            } // y
+                } // cc
+#if 1 && defined __MIC__
+                STORE_OUTPUTS;
+#endif
+
+                        }
+
+                        else{
+#if 1 && defined __MIC__
+                LOAD_OUTPUTS;
+#endif
+                            for (int cc = 0; cc < C_BLOCK; cc++){
+                            float *restrict inputs_pointer = INPUTS + ti5(n_block, c+cc, mx(mn(h-padding_const5, H_const5-1), 0), mx(mn(w-padding_const5, W_const5-1), 0), 0, C_const5, H_const5, W_const5, N_BLOCK);
+                        float *restrict filters_pointer = FILTERS + ti5(k_block, c+cc, 0, 0, 0, C_const5, Y_const5, X_const5, K_BLOCK);
+                            
+                int min_x = mx(0, (padding_const5 - w)); 
+                int max_x = mn(X_const5, (W_const5 + padding_const5 - w)); 
+                int min_y = mx(0, (padding_const5 - h)); 
+                int max_y = mn(Y_const5, (H_const5 + padding_const5 - h)); 
+
+                filters_pointer += min_y*X_const5*K_BLOCK;
+                //TODO: I am fairly sure more prefetches are required for FILTERS here...
+                            for (y = min_y; y < max_y; ++y){
+                                float *restrict inputs_pointer_y = inputs_pointer; // start-of-line pointer
+                filters_pointer += min_x*K_BLOCK;
+                // This prefetch is only for INPUTS order [N, C, H, W]    
+                //_mm_prefetch((char *)(inputs_pointer + W_const5*N_BLOCK), _MM_HINT_T0);
+#pragma unroll (X_const5-padding_const5)
+#pragma noprefetch
+                                for (x = min_x; x < max_x; ++x)
+                {
+#if 1 && defined __MIC__
+                    // This assumes the filters are already in L2...
+                    PREFETCH_INPUTS;
+                    PREFETCH_FILTERS;
+                    LOAD_INPUTS;
+                    LOAD_FILTERS;
+                    COMPUTE_OUTPUTS;
+#endif
+                                    filters_pointer += K_BLOCK;
+                                    inputs_pointer += N_BLOCK;
+                } // x
+                filters_pointer += (X_const5 - max_x)*K_BLOCK;
+                                inputs_pointer = inputs_pointer_y + W_const5*N_BLOCK; 
+                            } //y 
+                filters_pointer += (Y_const5 - max_y)*X_const5*K_BLOCK;
+                } //cc
+#if 1 && defined __MIC__
+                STORE_OUTPUTS;
+#endif
+
+                        } // if-else
+                    } // w
+                } // h
+            } // c_block
+
+
+            // ~=~=~=~=~=~=~=~= POOLING ~=~=~=~=~=~=~=~= 
+            for (h = 0; h < pooled_H_const5; h++){
+                for (w = 0; w < pooled_W_const5; w++){
+
+                    int h_output = h*pooling_stride_const5;
+                    int w_output = w*pooling_stride_const5;
+
+                    int window_width = pooling_radius_const5 - mx(w_output + pooling_radius_const5 - output_W_const5, 0);
+                    int window_height = pooling_radius_const5 - mx(h_output + pooling_radius_const5 - output_H_const5, 0);
+                    
+                    for (int kk = 0; kk < K_BLOCK; kk++){
+#if K_BLOCK > N_BLOCK 
+                        float *restrict outputs_pointer = SCRATCH + ti5(omp_get_thread_num(), h_output, w_output, 0, kk, output_H_const5, output_W_const5, N_BLOCK, K_BLOCK);
+#else
+                        float *restrict outputs_pointer = SCRATCH + ti5(omp_get_thread_num(), h_output, w_output, kk, 0, output_H_const5, output_W_const5, K_BLOCK, N_BLOCK);
+#endif
+                        int *restrict argmaxs_pointer = ARGMAXS + ti5(n_block, k + kk, h, w, 0, K_const5, pooled_H_const5, pooled_W_const5, N_BLOCK);
+                        float *restrict pooled_outputs_pointer = OUTPUTS + ti5(n_block, k + kk, h, w, 0, K_const5, pooled_H_const5, pooled_W_const5, N_BLOCK);
+                        pooled_outputs_pointer[0 : N_BLOCK] = -1.0e6;
+
+                        int outputs_index = h_output*output_W_const5 + w_output;
+                        for (y = 0; y < window_height; y++){
+                            for (x = 0; x < window_width; x++){
+#if K_BLOCK > N_BLOCK
+                                if (outputs_pointer[0 : N_BLOCK : K_BLOCK] > pooled_outputs_pointer[0 : N_BLOCK]){
+                                    pooled_outputs_pointer[0 : N_BLOCK] = outputs_pointer[0 : N_BLOCK : K_BLOCK];
+                                    argmaxs_pointer[0 : N_BLOCK] = outputs_index;
+                                }
+#else
+                                if (outputs_pointer[0 : N_BLOCK] > pooled_outputs_pointer[0 : N_BLOCK]){
+                                    pooled_outputs_pointer[0 : N_BLOCK] = outputs_pointer[0 : N_BLOCK];
+                                    argmaxs_pointer[0 : N_BLOCK] = outputs_index;
+                                }
+#endif
+                                outputs_index++;
+                                outputs_pointer += K_BLOCK*N_BLOCK;
+                            }
+                            outputs_index += output_W_const5 - window_width;
+                            outputs_pointer += (output_W_const5 - window_width)*K_BLOCK*N_BLOCK;
+                        }
+                    }
+
+                }
+            }
+        } //nk
+
+    } // pragma_offload
+}
+
+int *convolution_layer6(int N, int C, int H, int W, float *restrict INPUTS, int K, int Y, int X, float *restrict FILTERS, float *restrict OUTPUTS, int *restrict ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH){
+    assert(C == C_const6);
+    assert(H == H_const6);
+    assert(W == W_const6);
+    assert(K == K_const6);
+    assert(stride == stride_const6);
+    assert(padding == padding_const6);
+    assert(pooling_radius == pooling_radius_const6);
+    assert(pooling_stride == pooling_stride_const6);
+    assert(X == X_const6);
+    assert(Y == Y_const6);
+    assert(output_H_const6 == (H_const6 + 2*padding_const6 - Y_const6 + 1)/stride_const6);
+    assert(output_W_const6 == (W_const6 + 2*padding_const6 - X_const6 + 1)/stride_const6);
+    assert(pooled_H_const6 == ceil((output_H_const6 - pooling_radius_const6 + 1.f)/pooling_stride_const6));
+    assert(pooled_W_const6 == ceil((output_W_const6 - pooling_radius_const6 + 1.f)/pooling_stride_const6));
+
+    #pragma offload target(mic:MIC_DEV) if(offloaded == 1) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(FILTERS:length(0) REUSE) \ 
+    in(OUTPUTS:length(0) REUSE) \
+    in(ARGMAXS:length(0) REUSE) \
+    in(SCRATCH:length(0) REUSE)
+    {
+        int n_block, n, k_block, k, i, j, h, w, c, c_block, y, x;
+        int nk, hw, ij, nkhw;
+
+        // computation of const2ants
+        int XWN = (-X_const6 + W_const6)*N,
+            HYWN = (H_const6-Y_const6)*W_const6*N;        
+
+        #pragma omp parallel for \
+            schedule(dynamic) \
+            default(none) \
+            private(nk, hw, ij, n_block, n, k, k_block, h, w, c, c_block, y, x, i, j) \
+            shared(N, INPUTS, OUTPUTS, FILTERS, ARGMAXS, SCRATCH, XWN, HYWN)
+        
+        // ~=~=~=~=~=~=~=~= CONVOLUTION ~=~=~=~=~=~=~=~= 
+        for (nk = 0; nk < N/N_BLOCK*K_const6/K_BLOCK; nk++){
+           
+#if K_BLOCK > N_BLOCK
+            k_block = nk / (N/N_BLOCK);
+            k = k_block*K_BLOCK;
+            n_block = md(nk, N/N_BLOCK);
+            n = n_block*N_BLOCK;
+#else 
+            n_block = nk / (K_const6/K_BLOCK);
+            n = n_block*N_BLOCK;
+            k_block = md(nk, K_const6/K_BLOCK);
+            k = k_block*K_BLOCK;
+#endif
+
+            SCRATCH[omp_get_thread_num()*output_H_const6*output_W_const6*N_BLOCK*K_BLOCK : output_H_const6*output_W_const6*N_BLOCK*K_BLOCK] = 0.f;
+
+            for (c_block = 0; c_block < C_const6/C_BLOCK; c_block++){
+                c = c_block*C_BLOCK;
+
+                for (h = 0; h < output_H_const6; h++){
+                    for (w = 0; w < output_W_const6; w++){
+
+#if K_BLOCK > N_BLOCK
+                        float *restrict convolutions = SCRATCH + ti5(omp_get_thread_num(), h, w, 0, 0, output_H_const6, output_W_const6, N_BLOCK, K_BLOCK);
+                        float *restrict convolutions_next = SCRATCH + ti5(omp_get_thread_num(), h, w+1, 0, 0, output_H_const6, output_W_const6, N_BLOCK, K_BLOCK);
+#else
+                        float *restrict convolutions = SCRATCH + ti5(omp_get_thread_num(), h, w, 0, 0, output_H_const6, output_W_const6, K_BLOCK, N_BLOCK);
+                        float *restrict convolutions_next = SCRATCH + ti5(omp_get_thread_num(), h, w+1, 0, 0, output_H_const6, output_W_const6, K_BLOCK, N_BLOCK);
+#endif
+                __assume_aligned(convolutions, 64);
+
+#pragma unroll
+            for(int i = 0; i < (N_BLOCK*K_BLOCK); i+= 16)
+            {
+                _mm_prefetch((char *)(convolutions_next + i), _MM_HINT_ET0);
+            }
+
+                        // if we're not on boundary (i.e not affected by padding)
+                        if (w - padding_const6 >= 0 &&
+                            h - padding_const6 >= 0 &&
+                            output_W_const6 - 1 - w >= padding_const6  &&
+                            output_H_const6 - 1 - h >= padding_const6){
+
+#if 1 && defined __MIC__
+                // The following loads the a N_BLOCK*K_BLOCK region of SCRATCH space into SIMD registers
+                LOAD_OUTPUTS;
+#endif
+
+#pragma unroll (C_BLOCK)
+                            for (int cc = 0; cc < C_BLOCK; cc++){
+                            float *restrict inputs_pointer = INPUTS + ti5(n_block, c+cc, h - padding_const6, w - padding_const6, 0, C_const6, H_const6, W_const6, N_BLOCK);
+                        float *restrict filters_pointer = FILTERS + ti5(k_block, c+cc, 0, 0, 0, C_const6, Y_const6, X_const6, K_BLOCK);
+                             
+                // The idea is to ensure that the working space of INPUTS = [N_BLOCK * C_BLOCK * W * Y] is small enough to fit in L2 so that we can reuse across [H,W] loops; if not we have a problem; CHECK if performance is low.  
+                // The idea is to ensure that the working space of FILTERS = [K_BLOCK * C_BLOCK * X * Y] is small enough to fit in L2 so that we can reuse across [H,W] loops; if not we have a problem; CHECK if performance is low.  
+                // TODO: introduce L2 prefetch for INPUTS + ti5(n_block, c, h - padding_const6 + Y_const6, w - padding_const6 + X_const6 + 2 that may help the above problem if it exists
+                            for (y = 0; y < Y_const6; ++y){                            
+                // This prefetch is only for INPUTS order [N, C, H, W]    
+                //_mm_prefetch((char *)(inputs_pointer + W_const6*N_BLOCK), _MM_HINT_T0);
+                                for (x = 0; x < X_const6; ++x)
+                {
+#if 1 && defined __MIC__
+                    // This assumes the filters are already in L2...
+                    PREFETCH_INPUTS;
+                    PREFETCH_FILTERS;
+                    LOAD_INPUTS;
+                    LOAD_FILTERS;
+                    COMPUTE_OUTPUTS;
+#endif
+                    filters_pointer += K_BLOCK;
+                                    inputs_pointer += N_BLOCK;
+                                } // x
+                                inputs_pointer += (-X_const6 + W_const6)*N_BLOCK;
+                            } // y
+                } // cc
+#if 1 && defined __MIC__
+                STORE_OUTPUTS;
+#endif
+
+                        }
+
+                        else{
+#if 1 && defined __MIC__
+                LOAD_OUTPUTS;
+#endif
+                            for (int cc = 0; cc < C_BLOCK; cc++){
+                            float *restrict inputs_pointer = INPUTS + ti5(n_block, c+cc, mx(mn(h-padding_const6, H_const6-1), 0), mx(mn(w-padding_const6, W_const6-1), 0), 0, C_const6, H_const6, W_const6, N_BLOCK);
+                        float *restrict filters_pointer = FILTERS + ti5(k_block, c+cc, 0, 0, 0, C_const6, Y_const6, X_const6, K_BLOCK);
+                            
+                int min_x = mx(0, (padding_const6 - w)); 
+                int max_x = mn(X_const6, (W_const6 + padding_const6 - w)); 
+                int min_y = mx(0, (padding_const6 - h)); 
+                int max_y = mn(Y_const6, (H_const6 + padding_const6 - h)); 
+
+                filters_pointer += min_y*X_const6*K_BLOCK;
+                //TODO: I am fairly sure more prefetches are required for FILTERS here...
+                            for (y = min_y; y < max_y; ++y){
+                                float *restrict inputs_pointer_y = inputs_pointer; // start-of-line pointer
+                filters_pointer += min_x*K_BLOCK;
+                // This prefetch is only for INPUTS order [N, C, H, W]    
+                //_mm_prefetch((char *)(inputs_pointer + W_const6*N_BLOCK), _MM_HINT_T0);
+#pragma unroll (X_const6-padding_const6)
+#pragma noprefetch
+                                for (x = min_x; x < max_x; ++x)
+                {
+#if 1 && defined __MIC__
+                    // This assumes the filters are already in L2...
+                    PREFETCH_INPUTS;
+                    PREFETCH_FILTERS;
+                    LOAD_INPUTS;
+                    LOAD_FILTERS;
+                    COMPUTE_OUTPUTS;
+#endif
+                                    filters_pointer += K_BLOCK;
+                                    inputs_pointer += N_BLOCK;
+                } // x
+                filters_pointer += (X_const6 - max_x)*K_BLOCK;
+                                inputs_pointer = inputs_pointer_y + W_const6*N_BLOCK; 
+                            } //y 
+                filters_pointer += (Y_const6 - max_y)*X_const6*K_BLOCK;
+                } //cc
+#if 1 && defined __MIC__
+                STORE_OUTPUTS;
+#endif
+
+                        } // if-else
+                    } // w
+                } // h
+            } // c_block
+
+
+            // ~=~=~=~=~=~=~=~= POOLING ~=~=~=~=~=~=~=~= 
+            for (h = 0; h < pooled_H_const6; h++){
+                for (w = 0; w < pooled_W_const6; w++){
+
+                    int h_output = h*pooling_stride_const6;
+                    int w_output = w*pooling_stride_const6;
+
+                    int window_width = pooling_radius_const6 - mx(w_output + pooling_radius_const6 - output_W_const6, 0);
+                    int window_height = pooling_radius_const6 - mx(h_output + pooling_radius_const6 - output_H_const6, 0);
+                    
+                    for (int kk = 0; kk < K_BLOCK; kk++){
+#if K_BLOCK > N_BLOCK 
+                        float *restrict outputs_pointer = SCRATCH + ti5(omp_get_thread_num(), h_output, w_output, 0, kk, output_H_const6, output_W_const6, N_BLOCK, K_BLOCK);
+#else
+                        float *restrict outputs_pointer = SCRATCH + ti5(omp_get_thread_num(), h_output, w_output, kk, 0, output_H_const6, output_W_const6, K_BLOCK, N_BLOCK);
+#endif
+                        int *restrict argmaxs_pointer = ARGMAXS + ti5(n_block, k + kk, h, w, 0, K_const6, pooled_H_const6, pooled_W_const6, N_BLOCK);
+                        float *restrict pooled_outputs_pointer = OUTPUTS + ti5(n_block, k + kk, h, w, 0, K_const6, pooled_H_const6, pooled_W_const6, N_BLOCK);
+                        pooled_outputs_pointer[0 : N_BLOCK] = -1.0e6;
+
+                        int outputs_index = h_output*output_W_const6 + w_output;
+                        for (y = 0; y < window_height; y++){
+                            for (x = 0; x < window_width; x++){
+#if K_BLOCK > N_BLOCK
+                                if (outputs_pointer[0 : N_BLOCK : K_BLOCK] > pooled_outputs_pointer[0 : N_BLOCK]){
+                                    pooled_outputs_pointer[0 : N_BLOCK] = outputs_pointer[0 : N_BLOCK : K_BLOCK];
+                                    argmaxs_pointer[0 : N_BLOCK] = outputs_index;
+                                }
+#else
+                                if (outputs_pointer[0 : N_BLOCK] > pooled_outputs_pointer[0 : N_BLOCK]){
+                                    pooled_outputs_pointer[0 : N_BLOCK] = outputs_pointer[0 : N_BLOCK];
+                                    argmaxs_pointer[0 : N_BLOCK] = outputs_index;
+                                }
+#endif
+                                outputs_index++;
+                                outputs_pointer += K_BLOCK*N_BLOCK;
+                            }
+                            outputs_index += output_W_const6 - window_width;
+                            outputs_pointer += (output_W_const6 - window_width)*K_BLOCK*N_BLOCK;
+                        }
+                    }
+
+                }
+            }
+        } //nk
+
+    } // pragma_offload
+}
+
 
 // gradient for intense blocking/data sturctures
 
@@ -882,10 +1750,1499 @@ int *convolution_layer2(int N, int C, int H, int W, float *restrict INPUTS, int 
 // }
 
 
-// INPUTS data structure [N, C/C_BLOCK, H, W, C_BLOCK]
+// INPUTS/D_INPUTS data structure [N, C/C_BLOCK, H, W, C_BLOCK]
 // D_FILTERS/FILTERS data structure [C/C_BLOCK, Y/Y_BLOCK, K, Y_BLOCK, X, C_BLOCK]
 // ARGMAXS/OUTPUTS/D_POOLED_OUTPUTS data structure [N, pooled_H, pooled_W, K]
 void convolution_gradient_layer2(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_POOLED_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH){
+    assert(C == C_const2);
+    assert(H == H_const2);
+    assert(W == W_const2);
+    assert(K == K_const2);
+    assert(padding == padding_const2);
+    assert(X == X_const2);
+    assert(Y == Y_const2);
+    assert(output_H_const2 == (H_const2 + 2*padding_const2 - Y_const2 + 1)/stride_const2);
+    assert(output_W_const2 == (W_const2 + 2*padding_const2 - X_const2 + 1)/stride_const2);
+    assert(pooled_H_const2 == ceil((output_H_const2 - pooling_radius_const2 + 1.f)/pooling_stride_const2));
+    assert(pooled_W_const2 == ceil((output_W_const2 - pooling_radius_const2 + 1.f)/pooling_stride_const2));
+
+
+    #pragma offload target(mic:MIC_DEV) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(D_INPUTS:length(0) REUSE) \ 
+    in(FILTERS:length(0) REUSE) \ 
+    in(ARGMAXS:length(0) REUSE) \
+    in(D_POOLED_OUTPUTS:length(0) REUSE) \
+    in(D_FILTERS:length(0) REUSE) \
+    in(SCRATCH:length(0) REUSE)
+    {
+
+        int C_blocks = C_const2/C_BLOCK_GRAD2;
+        int Y_blocks = Y_const2/Y_BLOCK_GRAD2;
+        int N_blocks = N/N_BLOCK_GRAD2;
+        int H_blocks = output_H_const2/H_ARG_BLOCK_GRAD2;
+        int W_blocks = output_W_const2/W_ARG_BLOCK_GRAD2;
+    
+        omp_lock_t writelock[C_blocks*Y_blocks*16];
+
+        for(int i = 0; i < C_blocks*Y_blocks; i++)      
+            omp_init_lock(&writelock[16*i]);
+    
+        // double st = omp_get_wtime();
+        #pragma omp parallel for \
+        default(none) \
+        schedule(dynamic) \
+        shared(N, INPUTS, D_INPUTS, ARGMAXS, FILTERS, D_POOLED_OUTPUTS, D_FILTERS, SCRATCH, C_blocks, Y_blocks, N_blocks, H_blocks, W_blocks, writelock)
+        for (int outer = 0; outer < N_blocks * H_blocks * W_blocks * C_blocks * Y_blocks; outer++){
+            int n_block = outer / (H_blocks * W_blocks * C_blocks * Y_blocks);
+            int n = n_block*N_BLOCK_GRAD2;
+
+            int h_block = md(outer, H_blocks * W_blocks * C_blocks * Y_blocks) / (W_blocks * C_blocks * Y_blocks);
+            int h = h_block * H_ARG_BLOCK_GRAD2;
+
+            int w_block = md(outer, W_blocks * C_blocks * Y_blocks) / (C_blocks * Y_blocks);
+            int w = w_block * W_ARG_BLOCK_GRAD2;
+
+            int c_block = md(outer, C_blocks * Y_blocks) / (Y_blocks);
+            int c = c_block * C_BLOCK_GRAD2;
+
+            int y_block = md(outer, Y_blocks);
+            int y = y_block * Y_BLOCK_GRAD2;
+
+        int size_local_scratch = Y_BLOCK_GRAD2 * X_const2 * C_BLOCK_GRAD2;
+            float *restrict local_scratch = SCRATCH + ti7(n_block*H_blocks*W_blocks + h_block*W_blocks + w_block, c_block,  y_block,  0,      0,        0,       0, 
+                                                                                C_blocks, Y_blocks, K_const2, Y_BLOCK_GRAD2, X_const2, C_BLOCK_GRAD2);
+            local_scratch[ 0 : K_const2*Y_BLOCK_GRAD2*X_const2*C_BLOCK_GRAD2] = 0.f;
+            
+            float * restrict FILTERS_pointer_base = FILTERS + (c_block * Y_blocks + y_block) * K_const2*Y_BLOCK_GRAD2*X_const2*C_BLOCK_GRAD2;
+            // for each element in the pre-pooled outputs, find out whether it is an argmax 
+            for (int n_tot = n; n_tot < n + N_BLOCK_GRAD2; n_tot++){
+                for (int h_arg = h; h_arg < mn(h + H_ARG_BLOCK_GRAD2, output_H_const2); h_arg++){
+                    if ((y + h_arg - padding_const2 < 0) || (y + h_arg - padding_const2 >= H_const2)) continue;
+                    int h_start = mx((h_arg + pooling_stride_const2 - pooling_radius_const2)/pooling_stride_const2, 0); 
+                    int h_end = mn(h_arg/pooling_stride_const2, pooled_H_const2 - 1); 
+                    int h_inputs = h_arg + y - padding_const2;
+
+                    for (int w_arg = w; w_arg < mn(w + W_ARG_BLOCK_GRAD2, output_W_const2); w_arg++){
+                        int linear_index = h_arg*output_W_const2 + w_arg;
+
+                        // figure out the width of the window that is valid (i.e, not out-of-bounds for INPUTS)
+                        int x_invalid_left = mx(padding_const2 - w_arg, 0);
+                        int x_invalid_right = mx(w_arg - padding_const2 + X_const2 - W_const2, 0);
+                        int x_len = mx(X_const2 - x_invalid_left - x_invalid_right, 0);
+                        int x_len_aligned = x_len / 2 * 2;
+
+                        int w_start = mx((w_arg + pooling_stride_const2 - pooling_radius_const2)/pooling_stride_const2, 0);
+                        int w_end = mn(w_arg/pooling_stride_const2, pooled_W_const2 - 1);
+                        int w_inputs = mx(mn(w_arg - padding_const2, W_const2 - 1), 0);
+            
+            float * restrict INPUTS_pointer_base = INPUTS + ti5(n_tot,  c_block,  h_inputs,  w_inputs,   0, C_blocks,   H_const2,     W_const2, C_BLOCK_GRAD2);
+            float * restrict D_INPUTS_pointer_base = D_INPUTS + ti5(n_tot,  c_block,  h_inputs,  w_inputs,   0, C_blocks,   H_const2,     W_const2, C_BLOCK_GRAD2);
+                    int full_x_line = (x_len == X_const2);
+                    __declspec(aligned(64)) float pooled_outputs_coefficients[K_const2];
+                    __declspec(aligned(64)) int ks[K_const2];
+                    for(int i = 0; i < X_const2; i++) _mm_prefetch((char *)(INPUTS_pointer_base + i*16), _MM_HINT_T0); 
+                    if(full_x_line)
+                    {
+                            // scan over all windows in which this element appears
+                            for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
+                                    for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
+                                        int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const2, pooled_W_const2, K_const2);
+                                int cnt = K_const2;
+                                #if defined __MIC__
+                                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
+                                cnt = 0;
+                                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                                        for (int k = 0; k < K_const2; k+=16){
+                                        __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
+                                        __m512i v_ARGMAXS = _mm512_undefined_epi32();
+                                        __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
+                                        v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
+                                        v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
+                                        __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
+                                        _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
+                                        _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
+                                        cnt += _mm_countbits_32(m); 
+                                }
+                                #endif
+                                        for (int k2 = 0; k2 < cnt; k2++){
+                                                // if this (h_arg, w_arg) is the argmax of the window
+                                                int k = ks[k2];
+                                                float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
+                                            float * restrict local_scratch_pointer = local_scratch + k*size_local_scratch;
+                                            float * restrict local_scratch_pointer_next = local_scratch + ks[k2+1]*size_local_scratch;
+                                        float * restrict INPUTS_pointer = INPUTS_pointer_base;  
+                                        float * restrict D_INPUTS_pointer = D_INPUTS_pointer_base;  
+                                float * restrict FILTERS_pointer = FILTERS_pointer_base + k*size_local_scratch;
+                                float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ks[k2+1]*size_local_scratch;
+                                        #if (C_BLOCK_GRAD2 == 16) && (defined __MIC__)
+                                        __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
+                                        #pragma unroll (X_const2)
+                                        for(int i = 0; i < X_const2; i++)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + i*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + i*16), _MM_HINT_T0);
+                                                __m512 v_input_0 = _mm512_extload_ps(INPUTS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_0 = _mm512_extload_ps(D_INPUTS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_0 = _mm512_extload_ps(FILTERS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
+                                            v_d_input_0 = _mm512_fmadd_ps(v_filters_0, v_pooled_outputs_coefficient, v_d_input_0);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer), v_d_input_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                            local_scratch_pointer += 16;
+                                            INPUTS_pointer += 16;
+                                            FILTERS_pointer += 16;
+                                            D_INPUTS_pointer += 16;
+                                        }
+                                        #else
+                                        local_scratch_pointer[0 : x_len*C_BLOCK_GRAD2] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD2]; 
+                                        D_INPUTS_pointer[0 : x_len*C_BLOCK_GRAD2] += pooled_outputs_coefficient * FILTERS_pointer[0 : x_len*C_BLOCK_GRAD2]; 
+                                        #endif
+                                        } // k
+                                    } // w_pooled
+                            } // h_pooled
+                    }
+                    else
+                    {
+                            // scan over all windows in which this element appears
+                            for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
+                                    for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
+                                        int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const2, pooled_W_const2, K_const2);
+                                int cnt = K_const2;
+                                #if defined __MIC__
+                                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
+                                cnt = 0;
+                                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                                        for (int k = 0; k < K_const2; k+=16){
+                                        __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
+                                        __m512i v_ARGMAXS = _mm512_undefined_epi32();
+                                        __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
+                                        v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
+                                        v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
+                                        __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
+                                        _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
+                                        _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
+                                        cnt += _mm_countbits_32(m); 
+                                }
+                                #endif
+                                        for (int k2 = 0; k2 < cnt; k2++){
+                                                // if this (h_arg, w_arg) is the argmax of the window
+                                                int k = ks[k2];
+                                                float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
+                                            float * restrict local_scratch_pointer = local_scratch + ti(k,   0,   x_invalid_left,   0, Y_BLOCK_GRAD2,   X_const2,  C_BLOCK_GRAD2); 
+                                            float * restrict local_scratch_pointer_next = local_scratch + ti(ks[k2+1],  0,  0,   0, Y_BLOCK_GRAD2,   X_const2,     C_BLOCK_GRAD2);
+                                        float * restrict INPUTS_pointer = INPUTS_pointer_base;  
+                                        float * restrict D_INPUTS_pointer = D_INPUTS_pointer_base;  
+                                // float * restrict FILTERS_pointer = FILTERS_pointer_base + k*size_local_scratch;
+                                // float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ks[k2+1]*size_local_scratch;
+                                float * restrict FILTERS_pointer = FILTERS_pointer_base + ti(k,   0,   x_invalid_left,   0, Y_BLOCK_GRAD2,   X_const2,  C_BLOCK_GRAD2);
+                                float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ti(ks[k2+1],  0,  0,   0, Y_BLOCK_GRAD2,   X_const2,     C_BLOCK_GRAD2);
+                                        #if (C_BLOCK_GRAD2 == 16) && defined __MIC__
+                                        __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
+                                        for(int x = 0; x < x_len_aligned; x+=2)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16 + 16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16), _MM_HINT_T0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16 + 16), _MM_HINT_T0);
+                                                __m512 v_input_0   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD2, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_input_1   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD2 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_0 = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD2, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_1 = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD2 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD2, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_1 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD2 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_0 = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD2, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_1 = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD2 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
+                                            v_scratch_1 = _mm512_fmadd_ps(v_input_1, v_pooled_outputs_coefficient, v_scratch_1);
+                                            v_d_input_0 = _mm512_fmadd_ps(v_filters_0, v_pooled_outputs_coefficient, v_d_input_0);
+                                            v_d_input_1 = _mm512_fmadd_ps(v_filters_1, v_pooled_outputs_coefficient, v_d_input_1);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD2 ), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD2 + 16), v_scratch_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD2 ), v_d_input_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD2 + 16), v_d_input_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                        }
+                                        for(int x = x_len_aligned; x < x_len; x++)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16), _MM_HINT_T0);
+                                                __m512 v_input   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD2, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD2, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD2, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD2, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch = _mm512_fmadd_ps(v_input, v_pooled_outputs_coefficient, v_scratch);
+                                            v_d_input = _mm512_fmadd_ps(v_filters, v_pooled_outputs_coefficient, v_d_input);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD2), v_scratch, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD2 ), v_d_input, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                        }
+                                        #else
+                                                    local_scratch_pointer[0 : x_len*C_BLOCK_GRAD2] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD2]; 
+                                        D_INPUTS_pointer[0 : x_len*C_BLOCK_GRAD2] += pooled_outputs_coefficient * FILTERS_pointer[0 : x_len*C_BLOCK_GRAD2]; 
+                                        #endif
+                                        } // k
+                                    } // w_pooled
+                            } // h_pooled
+                    }
+                      
+                    } // w_arg
+                } // h_arg
+            } // nn
+
+            omp_set_lock(&writelock[16*c_block*y_block]);
+            {
+            D_FILTERS[(c_block * Y_blocks + y_block) * K_const2*Y_BLOCK_GRAD2*X_const2*C_BLOCK_GRAD2 : K_const2*Y_BLOCK_GRAD2*X_const2*C_BLOCK_GRAD2] += local_scratch[ 0 : K_const2*Y_BLOCK_GRAD2*X_const2*C_BLOCK_GRAD2];
+            }
+            omp_unset_lock(&writelock[16*c_block*y_block]);
+
+        } // outer
+        // double end = omp_get_wtime();
+        // printf("Time first loop = %.5lf\n", (end - st));
+
+#if 0
+        for (int outer = 0; outer < N_blocks * H_blocks * W_blocks ; outer++){
+        #pragma omp parallel for schedule(dynamic)  
+        for(int inner = 0; inner < C_blocks*Y_blocks*K_const2*Y_BLOCK_GRAD2; inner++)
+        {
+            float *local_scratch_pointer = SCRATCH + outer*C_blocks*Y_blocks*K_const2*Y_BLOCK_GRAD2*X_const2*C_BLOCK_GRAD2 + inner*X_const2*C_BLOCK_GRAD2;
+            float *d_filters_pointer = D_FILTERS + inner*X_const2*C_BLOCK_GRAD2;
+            d_filters_pointer[0: X_const2*C_BLOCK_GRAD2] += local_scratch_pointer[0 : X_const2*C_BLOCK_GRAD2];
+        }
+    }
+#endif
+
+    } // pragma offload
+}
+
+
+void convolution_gradient_layer3(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_POOLED_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH){
+    assert(C == C_const3);
+    assert(H == H_const3);
+    assert(W == W_const3);
+    assert(K == K_const3);
+    assert(padding == padding_const3);
+    assert(X == X_const3);
+    assert(Y == Y_const3);
+    assert(output_H_const3 == (H_const3 + 2*padding_const3 - Y_const3 + 1)/stride_const3);
+    assert(output_W_const3 == (W_const3 + 2*padding_const3 - X_const3 + 1)/stride_const3);
+    assert(pooled_H_const3 == ceil((output_H_const3 - pooling_radius_const3 + 1.f)/pooling_stride_const3));
+    assert(pooled_W_const3 == ceil((output_W_const3 - pooling_radius_const3 + 1.f)/pooling_stride_const3));
+
+
+    #pragma offload target(mic:MIC_DEV) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(D_INPUTS:length(0) REUSE) \ 
+    in(FILTERS:length(0) REUSE) \ 
+    in(ARGMAXS:length(0) REUSE) \
+    in(D_POOLED_OUTPUTS:length(0) REUSE) \
+    in(D_FILTERS:length(0) REUSE) \
+    in(SCRATCH:length(0) REUSE)
+    {
+
+        int C_blocks = C_const3/C_BLOCK_GRAD3;
+        int Y_blocks = Y_const3/Y_BLOCK_GRAD3;
+        int N_blocks = N/N_BLOCK_GRAD3;
+        int H_blocks = output_H_const3/H_ARG_BLOCK_GRAD3;
+        int W_blocks = output_W_const3/W_ARG_BLOCK_GRAD3;
+    
+        omp_lock_t writelock[C_blocks*Y_blocks*16];
+
+        for(int i = 0; i < C_blocks*Y_blocks; i++)      
+            omp_init_lock(&writelock[16*i]);
+    
+        // double st = omp_get_wtime();
+        #pragma omp parallel for \
+        default(none) \
+        schedule(dynamic) \
+        shared(N, INPUTS, D_INPUTS, ARGMAXS, FILTERS, D_POOLED_OUTPUTS, D_FILTERS, SCRATCH, C_blocks, Y_blocks, N_blocks, H_blocks, W_blocks, writelock)
+        for (int outer = 0; outer < N_blocks * H_blocks * W_blocks * C_blocks * Y_blocks; outer++){
+            int n_block = outer / (H_blocks * W_blocks * C_blocks * Y_blocks);
+            int n = n_block*N_BLOCK_GRAD3;
+
+            int h_block = md(outer, H_blocks * W_blocks * C_blocks * Y_blocks) / (W_blocks * C_blocks * Y_blocks);
+            int h = h_block * H_ARG_BLOCK_GRAD3;
+
+            int w_block = md(outer, W_blocks * C_blocks * Y_blocks) / (C_blocks * Y_blocks);
+            int w = w_block * W_ARG_BLOCK_GRAD3;
+
+            int c_block = md(outer, C_blocks * Y_blocks) / (Y_blocks);
+            int c = c_block * C_BLOCK_GRAD3;
+
+            int y_block = md(outer, Y_blocks);
+            int y = y_block * Y_BLOCK_GRAD3;
+
+        int size_local_scratch = Y_BLOCK_GRAD3 * X_const3 * C_BLOCK_GRAD3;
+            float *restrict local_scratch = SCRATCH + ti7(n_block*H_blocks*W_blocks + h_block*W_blocks + w_block, c_block,  y_block,  0,      0,        0,       0, 
+                                                                                C_blocks, Y_blocks, K_const3, Y_BLOCK_GRAD3, X_const3, C_BLOCK_GRAD3);
+            local_scratch[ 0 : K_const3*Y_BLOCK_GRAD3*X_const3*C_BLOCK_GRAD3] = 0.f;
+            
+            float * restrict FILTERS_pointer_base = FILTERS + (c_block * Y_blocks + y_block) * K_const3*Y_BLOCK_GRAD3*X_const3*C_BLOCK_GRAD3;
+            // for each element in the pre-pooled outputs, find out whether it is an argmax 
+            for (int n_tot = n; n_tot < n + N_BLOCK_GRAD3; n_tot++){
+                for (int h_arg = h; h_arg < mn(h + H_ARG_BLOCK_GRAD3, output_H_const3); h_arg++){
+                    if ((y + h_arg - padding_const3 < 0) || (y + h_arg - padding_const3 >= H_const3)) continue;
+                    int h_start = mx((h_arg + pooling_stride_const3 - pooling_radius_const3)/pooling_stride_const3, 0); 
+                    int h_end = mn(h_arg/pooling_stride_const3, pooled_H_const3 - 1); 
+                    int h_inputs = h_arg + y - padding_const3;
+
+                    for (int w_arg = w; w_arg < mn(w + W_ARG_BLOCK_GRAD3, output_W_const3); w_arg++){
+                        int linear_index = h_arg*output_W_const3 + w_arg;
+
+                        // figure out the width of the window that is valid (i.e, not out-of-bounds for INPUTS)
+                        int x_invalid_left = mx(padding_const3 - w_arg, 0);
+                        int x_invalid_right = mx(w_arg - padding_const3 + X_const3 - W_const3, 0);
+                        int x_len = mx(X_const3 - x_invalid_left - x_invalid_right, 0);
+                        int x_len_aligned = x_len / 2 * 2;
+
+                        int w_start = mx((w_arg + pooling_stride_const3 - pooling_radius_const3)/pooling_stride_const3, 0);
+                        int w_end = mn(w_arg/pooling_stride_const3, pooled_W_const3 - 1);
+                        int w_inputs = mx(mn(w_arg - padding_const3, W_const3 - 1), 0);
+            
+            float * restrict INPUTS_pointer_base = INPUTS + ti5(n_tot,  c_block,  h_inputs,  w_inputs,   0, C_blocks,   H_const3,     W_const3, C_BLOCK_GRAD3);
+            float * restrict D_INPUTS_pointer_base = D_INPUTS + ti5(n_tot,  c_block,  h_inputs,  w_inputs,   0, C_blocks,   H_const3,     W_const3, C_BLOCK_GRAD3);
+                    int full_x_line = (x_len == X_const3);
+                    __declspec(aligned(64)) float pooled_outputs_coefficients[K_const3];
+                    __declspec(aligned(64)) int ks[K_const3];
+                    for(int i = 0; i < X_const3; i++) _mm_prefetch((char *)(INPUTS_pointer_base + i*16), _MM_HINT_T0); 
+                    if(full_x_line)
+                    {
+                            // scan over all windows in which this element appears
+                            for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
+                                    for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
+                                        int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const3, pooled_W_const3, K_const3);
+                                int cnt = K_const3;
+                                #if defined __MIC__
+                                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
+                                cnt = 0;
+                                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                                        for (int k = 0; k < K_const3; k+=16){
+                                        __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
+                                        __m512i v_ARGMAXS = _mm512_undefined_epi32();
+                                        __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
+                                        v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
+                                        v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
+                                        __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
+                                        _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
+                                        _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
+                                        cnt += _mm_countbits_32(m); 
+                                }
+                                #endif
+                                        for (int k2 = 0; k2 < cnt; k2++){
+                                                // if this (h_arg, w_arg) is the argmax of the window
+                                                int k = ks[k2];
+                                                float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
+                                            float * restrict local_scratch_pointer = local_scratch + k*size_local_scratch;
+                                            float * restrict local_scratch_pointer_next = local_scratch + ks[k2+1]*size_local_scratch;
+                                        float * restrict INPUTS_pointer = INPUTS_pointer_base;  
+                                        float * restrict D_INPUTS_pointer = D_INPUTS_pointer_base;  
+                                float * restrict FILTERS_pointer = FILTERS_pointer_base + k*size_local_scratch;
+                                float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ks[k2+1]*size_local_scratch;
+                                        #if (C_BLOCK_GRAD3 == 16) && (defined __MIC__)
+                                        __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
+                                        #pragma unroll (X_const3)
+                                        for(int i = 0; i < X_const3; i++)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + i*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + i*16), _MM_HINT_T0);
+                                                __m512 v_input_0 = _mm512_extload_ps(INPUTS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_0 = _mm512_extload_ps(D_INPUTS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_0 = _mm512_extload_ps(FILTERS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
+                                            v_d_input_0 = _mm512_fmadd_ps(v_filters_0, v_pooled_outputs_coefficient, v_d_input_0);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer), v_d_input_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                            local_scratch_pointer += 16;
+                                            INPUTS_pointer += 16;
+                                            FILTERS_pointer += 16;
+                                            D_INPUTS_pointer += 16;
+                                        }
+                                        #else
+                                        local_scratch_pointer[0 : x_len*C_BLOCK_GRAD3] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD3]; 
+                                        D_INPUTS_pointer[0 : x_len*C_BLOCK_GRAD3] += pooled_outputs_coefficient * FILTERS_pointer[0 : x_len*C_BLOCK_GRAD3]; 
+                                        #endif
+                                        } // k
+                                    } // w_pooled
+                            } // h_pooled
+                    }
+                    else
+                    {
+                            // scan over all windows in which this element appears
+                            for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
+                                    for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
+                                        int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const3, pooled_W_const3, K_const3);
+                                int cnt = K_const3;
+                                #if defined __MIC__
+                                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
+                                cnt = 0;
+                                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                                        for (int k = 0; k < K_const3; k+=16){
+                                        __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
+                                        __m512i v_ARGMAXS = _mm512_undefined_epi32();
+                                        __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
+                                        v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
+                                        v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
+                                        __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
+                                        _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
+                                        _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
+                                        cnt += _mm_countbits_32(m); 
+                                }
+                                #endif
+                                        for (int k2 = 0; k2 < cnt; k2++){
+                                                // if this (h_arg, w_arg) is the argmax of the window
+                                                int k = ks[k2];
+                                                float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
+                                            float * restrict local_scratch_pointer = local_scratch + ti(k,   0,   x_invalid_left,   0, Y_BLOCK_GRAD3,   X_const3,  C_BLOCK_GRAD3); 
+                                            float * restrict local_scratch_pointer_next = local_scratch + ti(ks[k2+1],  0,  0,   0, Y_BLOCK_GRAD3,   X_const3,     C_BLOCK_GRAD3);
+                                        float * restrict INPUTS_pointer = INPUTS_pointer_base;  
+                                        float * restrict D_INPUTS_pointer = D_INPUTS_pointer_base;  
+                                // float * restrict FILTERS_pointer = FILTERS_pointer_base + k*size_local_scratch;
+                                // float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ks[k2+1]*size_local_scratch;
+                                float * restrict FILTERS_pointer = FILTERS_pointer_base + ti(k,   0,   x_invalid_left,   0, Y_BLOCK_GRAD3,   X_const3,  C_BLOCK_GRAD3);
+                                float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ti(ks[k2+1],  0,  0,   0, Y_BLOCK_GRAD3,   X_const3,     C_BLOCK_GRAD3);
+                                        #if (C_BLOCK_GRAD3 == 16) && defined __MIC__
+                                        __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
+                                        for(int x = 0; x < x_len_aligned; x+=2)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16 + 16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16), _MM_HINT_T0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16 + 16), _MM_HINT_T0);
+                                                __m512 v_input_0   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD3, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_input_1   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD3 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_0 = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD3, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_1 = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD3 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD3, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_1 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD3 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_0 = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD3, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_1 = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD3 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
+                                            v_scratch_1 = _mm512_fmadd_ps(v_input_1, v_pooled_outputs_coefficient, v_scratch_1);
+                                            v_d_input_0 = _mm512_fmadd_ps(v_filters_0, v_pooled_outputs_coefficient, v_d_input_0);
+                                            v_d_input_1 = _mm512_fmadd_ps(v_filters_1, v_pooled_outputs_coefficient, v_d_input_1);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD3 ), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD3 + 16), v_scratch_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD3 ), v_d_input_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD3 + 16), v_d_input_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                        }
+                                        for(int x = x_len_aligned; x < x_len; x++)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16), _MM_HINT_T0);
+                                                __m512 v_input   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD3, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD3, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD3, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD3, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch = _mm512_fmadd_ps(v_input, v_pooled_outputs_coefficient, v_scratch);
+                                            v_d_input = _mm512_fmadd_ps(v_filters, v_pooled_outputs_coefficient, v_d_input);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD3), v_scratch, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD3 ), v_d_input, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                        }
+                                        #else
+                                                    local_scratch_pointer[0 : x_len*C_BLOCK_GRAD3] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD3]; 
+                                        D_INPUTS_pointer[0 : x_len*C_BLOCK_GRAD3] += pooled_outputs_coefficient * FILTERS_pointer[0 : x_len*C_BLOCK_GRAD3]; 
+                                        #endif
+                                        } // k
+                                    } // w_pooled
+                            } // h_pooled
+                    }
+                      
+                    } // w_arg
+                } // h_arg
+            } // nn
+
+            omp_set_lock(&writelock[16*c_block*y_block]);
+            {
+            D_FILTERS[(c_block * Y_blocks + y_block) * K_const3*Y_BLOCK_GRAD3*X_const3*C_BLOCK_GRAD3 : K_const3*Y_BLOCK_GRAD3*X_const3*C_BLOCK_GRAD3] += local_scratch[ 0 : K_const3*Y_BLOCK_GRAD3*X_const3*C_BLOCK_GRAD3];
+            }
+            omp_unset_lock(&writelock[16*c_block*y_block]);
+
+        } // outer
+        // double end = omp_get_wtime();
+        // printf("Time first loop = %.5lf\n", (end - st));
+
+#if 0
+        for (int outer = 0; outer < N_blocks * H_blocks * W_blocks ; outer++){
+        #pragma omp parallel for schedule(dynamic)  
+        for(int inner = 0; inner < C_blocks*Y_blocks*K_const2*Y_BLOCK_GRAD2; inner++)
+        {
+            float *local_scratch_pointer = SCRATCH + outer*C_blocks*Y_blocks*K_const2*Y_BLOCK_GRAD2*X_const2*C_BLOCK_GRAD2 + inner*X_const2*C_BLOCK_GRAD2;
+            float *d_filters_pointer = D_FILTERS + inner*X_const2*C_BLOCK_GRAD2;
+            d_filters_pointer[0: X_const2*C_BLOCK_GRAD2] += local_scratch_pointer[0 : X_const2*C_BLOCK_GRAD2];
+        }
+    }
+#endif
+
+    } // pragma offload
+}
+
+void convolution_gradient_layer4(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_POOLED_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH){
+    assert(C == C_const4);
+    assert(H == H_const4);
+    assert(W == W_const4);
+    assert(K == K_const4);
+    assert(padding == padding_const4);
+    assert(X == X_const4);
+    assert(Y == Y_const4);
+    assert(output_H_const4 == (H_const4 + 2*padding_const4 - Y_const4 + 1)/stride_const4);
+    assert(output_W_const4 == (W_const4 + 2*padding_const4 - X_const4 + 1)/stride_const4);
+    assert(pooled_H_const4 == ceil((output_H_const4 - pooling_radius_const4 + 1.f)/pooling_stride_const4));
+    assert(pooled_W_const4 == ceil((output_W_const4 - pooling_radius_const4 + 1.f)/pooling_stride_const4));
+
+
+    #pragma offload target(mic:MIC_DEV) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(D_INPUTS:length(0) REUSE) \ 
+    in(FILTERS:length(0) REUSE) \ 
+    in(ARGMAXS:length(0) REUSE) \
+    in(D_POOLED_OUTPUTS:length(0) REUSE) \
+    in(D_FILTERS:length(0) REUSE) \
+    in(SCRATCH:length(0) REUSE)
+    {
+
+        int C_blocks = C_const4/C_BLOCK_GRAD4;
+        int Y_blocks = Y_const4/Y_BLOCK_GRAD4;
+        int N_blocks = N/N_BLOCK_GRAD4;
+        int H_blocks = output_H_const4/H_ARG_BLOCK_GRAD4;
+        int W_blocks = output_W_const4/W_ARG_BLOCK_GRAD4;
+    
+        omp_lock_t writelock[C_blocks*Y_blocks*16];
+
+        for(int i = 0; i < C_blocks*Y_blocks; i++)      
+            omp_init_lock(&writelock[16*i]);
+    
+        // double st = omp_get_wtime();
+        #pragma omp parallel for \
+        default(none) \
+        schedule(dynamic) \
+        shared(N, INPUTS, D_INPUTS, ARGMAXS, FILTERS, D_POOLED_OUTPUTS, D_FILTERS, SCRATCH, C_blocks, Y_blocks, N_blocks, H_blocks, W_blocks, writelock)
+        for (int outer = 0; outer < N_blocks * H_blocks * W_blocks * C_blocks * Y_blocks; outer++){
+            int n_block = outer / (H_blocks * W_blocks * C_blocks * Y_blocks);
+            int n = n_block*N_BLOCK_GRAD4;
+
+            int h_block = md(outer, H_blocks * W_blocks * C_blocks * Y_blocks) / (W_blocks * C_blocks * Y_blocks);
+            int h = h_block * H_ARG_BLOCK_GRAD4;
+
+            int w_block = md(outer, W_blocks * C_blocks * Y_blocks) / (C_blocks * Y_blocks);
+            int w = w_block * W_ARG_BLOCK_GRAD4;
+
+            int c_block = md(outer, C_blocks * Y_blocks) / (Y_blocks);
+            int c = c_block * C_BLOCK_GRAD4;
+
+            int y_block = md(outer, Y_blocks);
+            int y = y_block * Y_BLOCK_GRAD4;
+
+        int size_local_scratch = Y_BLOCK_GRAD4 * X_const4 * C_BLOCK_GRAD4;
+            float *restrict local_scratch = SCRATCH + ti7(n_block*H_blocks*W_blocks + h_block*W_blocks + w_block, c_block,  y_block,  0,      0,        0,       0, 
+                                                                                C_blocks, Y_blocks, K_const4, Y_BLOCK_GRAD4, X_const4, C_BLOCK_GRAD4);
+            local_scratch[ 0 : K_const4*Y_BLOCK_GRAD4*X_const4*C_BLOCK_GRAD4] = 0.f;
+            
+            float * restrict FILTERS_pointer_base = FILTERS + (c_block * Y_blocks + y_block) * K_const4*Y_BLOCK_GRAD4*X_const4*C_BLOCK_GRAD4;
+            // for each element in the pre-pooled outputs, find out whether it is an argmax 
+            for (int n_tot = n; n_tot < n + N_BLOCK_GRAD4; n_tot++){
+                for (int h_arg = h; h_arg < mn(h + H_ARG_BLOCK_GRAD4, output_H_const4); h_arg++){
+                    if ((y + h_arg - padding_const4 < 0) || (y + h_arg - padding_const4 >= H_const4)) continue;
+                    int h_start = mx((h_arg + pooling_stride_const4 - pooling_radius_const4)/pooling_stride_const4, 0); 
+                    int h_end = mn(h_arg/pooling_stride_const4, pooled_H_const4 - 1); 
+                    int h_inputs = h_arg + y - padding_const4;
+
+                    for (int w_arg = w; w_arg < mn(w + W_ARG_BLOCK_GRAD4, output_W_const4); w_arg++){
+                        int linear_index = h_arg*output_W_const4 + w_arg;
+
+                        // figure out the width of the window that is valid (i.e, not out-of-bounds for INPUTS)
+                        int x_invalid_left = mx(padding_const4 - w_arg, 0);
+                        int x_invalid_right = mx(w_arg - padding_const4 + X_const4 - W_const4, 0);
+                        int x_len = mx(X_const4 - x_invalid_left - x_invalid_right, 0);
+                        int x_len_aligned = x_len / 2 * 2;
+
+                        int w_start = mx((w_arg + pooling_stride_const4 - pooling_radius_const4)/pooling_stride_const4, 0);
+                        int w_end = mn(w_arg/pooling_stride_const4, pooled_W_const4 - 1);
+                        int w_inputs = mx(mn(w_arg - padding_const4, W_const4 - 1), 0);
+            
+            float * restrict INPUTS_pointer_base = INPUTS + ti5(n_tot,  c_block,  h_inputs,  w_inputs,   0, C_blocks,   H_const4,     W_const4, C_BLOCK_GRAD4);
+            float * restrict D_INPUTS_pointer_base = D_INPUTS + ti5(n_tot,  c_block,  h_inputs,  w_inputs,   0, C_blocks,   H_const4,     W_const4, C_BLOCK_GRAD4);
+                    int full_x_line = (x_len == X_const4);
+                    __declspec(aligned(64)) float pooled_outputs_coefficients[K_const4];
+                    __declspec(aligned(64)) int ks[K_const4];
+                    for(int i = 0; i < X_const4; i++) _mm_prefetch((char *)(INPUTS_pointer_base + i*16), _MM_HINT_T0); 
+                    if(full_x_line)
+                    {
+                            // scan over all windows in which this element appears
+                            for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
+                                    for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
+                                        int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const4, pooled_W_const4, K_const4);
+                                int cnt = K_const4;
+                                #if defined __MIC__
+                                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
+                                cnt = 0;
+                                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                                        for (int k = 0; k < K_const4; k+=16){
+                                        __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
+                                        __m512i v_ARGMAXS = _mm512_undefined_epi32();
+                                        __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
+                                        v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
+                                        v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
+                                        __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
+                                        _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
+                                        _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
+                                        cnt += _mm_countbits_32(m); 
+                                }
+                                #endif
+                                        for (int k2 = 0; k2 < cnt; k2++){
+                                                // if this (h_arg, w_arg) is the argmax of the window
+                                                int k = ks[k2];
+                                                float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
+                                            float * restrict local_scratch_pointer = local_scratch + k*size_local_scratch;
+                                            float * restrict local_scratch_pointer_next = local_scratch + ks[k2+1]*size_local_scratch;
+                                        float * restrict INPUTS_pointer = INPUTS_pointer_base;  
+                                        float * restrict D_INPUTS_pointer = D_INPUTS_pointer_base;  
+                                float * restrict FILTERS_pointer = FILTERS_pointer_base + k*size_local_scratch;
+                                float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ks[k2+1]*size_local_scratch;
+                                        #if (C_BLOCK_GRAD4 == 16) && (defined __MIC__)
+                                        __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
+                                        #pragma unroll (X_const4)
+                                        for(int i = 0; i < X_const4; i++)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + i*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + i*16), _MM_HINT_T0);
+                                                __m512 v_input_0 = _mm512_extload_ps(INPUTS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_0 = _mm512_extload_ps(D_INPUTS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_0 = _mm512_extload_ps(FILTERS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
+                                            v_d_input_0 = _mm512_fmadd_ps(v_filters_0, v_pooled_outputs_coefficient, v_d_input_0);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer), v_d_input_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                            local_scratch_pointer += 16;
+                                            INPUTS_pointer += 16;
+                                            FILTERS_pointer += 16;
+                                            D_INPUTS_pointer += 16;
+                                        }
+                                        #else
+                                        local_scratch_pointer[0 : x_len*C_BLOCK_GRAD4] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD4]; 
+                                        D_INPUTS_pointer[0 : x_len*C_BLOCK_GRAD4] += pooled_outputs_coefficient * FILTERS_pointer[0 : x_len*C_BLOCK_GRAD4]; 
+                                        #endif
+                                        } // k
+                                    } // w_pooled
+                            } // h_pooled
+                    }
+                    else
+                    {
+                            // scan over all windows in which this element appears
+                            for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
+                                    for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
+                                        int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const4, pooled_W_const4, K_const4);
+                                int cnt = K_const4;
+                                #if defined __MIC__
+                                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
+                                cnt = 0;
+                                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                                        for (int k = 0; k < K_const4; k+=16){
+                                        __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
+                                        __m512i v_ARGMAXS = _mm512_undefined_epi32();
+                                        __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
+                                        v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
+                                        v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
+                                        __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
+                                        _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
+                                        _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
+                                        cnt += _mm_countbits_32(m); 
+                                }
+                                #endif
+                                        for (int k2 = 0; k2 < cnt; k2++){
+                                                // if this (h_arg, w_arg) is the argmax of the window
+                                                int k = ks[k2];
+                                                float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
+                                            float * restrict local_scratch_pointer = local_scratch + ti(k,   0,   x_invalid_left,   0, Y_BLOCK_GRAD4,   X_const4,  C_BLOCK_GRAD4); 
+                                            float * restrict local_scratch_pointer_next = local_scratch + ti(ks[k2+1],  0,  0,   0, Y_BLOCK_GRAD4,   X_const4,     C_BLOCK_GRAD4);
+                                        float * restrict INPUTS_pointer = INPUTS_pointer_base;  
+                                        float * restrict D_INPUTS_pointer = D_INPUTS_pointer_base;  
+                                // float * restrict FILTERS_pointer = FILTERS_pointer_base + k*size_local_scratch;
+                                // float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ks[k2+1]*size_local_scratch;
+                                float * restrict FILTERS_pointer = FILTERS_pointer_base + ti(k,   0,   x_invalid_left,   0, Y_BLOCK_GRAD4,   X_const4,  C_BLOCK_GRAD4);
+                                float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ti(ks[k2+1],  0,  0,   0, Y_BLOCK_GRAD4,   X_const4,     C_BLOCK_GRAD4);
+                                        #if (C_BLOCK_GRAD4 == 16) && defined __MIC__
+                                        __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
+                                        for(int x = 0; x < x_len_aligned; x+=2)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16 + 16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16), _MM_HINT_T0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16 + 16), _MM_HINT_T0);
+                                                __m512 v_input_0   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD4, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_input_1   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD4 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_0 = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD4, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_1 = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD4 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD4, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_1 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD4 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_0 = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD4, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_1 = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD4 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
+                                            v_scratch_1 = _mm512_fmadd_ps(v_input_1, v_pooled_outputs_coefficient, v_scratch_1);
+                                            v_d_input_0 = _mm512_fmadd_ps(v_filters_0, v_pooled_outputs_coefficient, v_d_input_0);
+                                            v_d_input_1 = _mm512_fmadd_ps(v_filters_1, v_pooled_outputs_coefficient, v_d_input_1);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD4 ), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD4 + 16), v_scratch_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD4 ), v_d_input_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD4 + 16), v_d_input_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                        }
+                                        for(int x = x_len_aligned; x < x_len; x++)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16), _MM_HINT_T0);
+                                                __m512 v_input   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD4, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD4, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD4, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD4, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch = _mm512_fmadd_ps(v_input, v_pooled_outputs_coefficient, v_scratch);
+                                            v_d_input = _mm512_fmadd_ps(v_filters, v_pooled_outputs_coefficient, v_d_input);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD4), v_scratch, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD4 ), v_d_input, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                        }
+                                        #else
+                                                    local_scratch_pointer[0 : x_len*C_BLOCK_GRAD4] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD4]; 
+                                        D_INPUTS_pointer[0 : x_len*C_BLOCK_GRAD4] += pooled_outputs_coefficient * FILTERS_pointer[0 : x_len*C_BLOCK_GRAD4]; 
+                                        #endif
+                                        } // k
+                                    } // w_pooled
+                            } // h_pooled
+                    }
+                      
+                    } // w_arg
+                } // h_arg
+            } // nn
+
+            omp_set_lock(&writelock[16*c_block*y_block]);
+            {
+            D_FILTERS[(c_block * Y_blocks + y_block) * K_const4*Y_BLOCK_GRAD4*X_const4*C_BLOCK_GRAD4 : K_const4*Y_BLOCK_GRAD4*X_const4*C_BLOCK_GRAD4] += local_scratch[ 0 : K_const4*Y_BLOCK_GRAD4*X_const4*C_BLOCK_GRAD4];
+            }
+            omp_unset_lock(&writelock[16*c_block*y_block]);
+
+        } // outer
+        // double end = omp_get_wtime();
+        // printf("Time first loop = %.5lf\n", (end - st));
+
+#if 0
+        for (int outer = 0; outer < N_blocks * H_blocks * W_blocks ; outer++){
+        #pragma omp parallel for schedule(dynamic)  
+        for(int inner = 0; inner < C_blocks*Y_blocks*K_const2*Y_BLOCK_GRAD2; inner++)
+        {
+            float *local_scratch_pointer = SCRATCH + outer*C_blocks*Y_blocks*K_const2*Y_BLOCK_GRAD2*X_const2*C_BLOCK_GRAD2 + inner*X_const2*C_BLOCK_GRAD2;
+            float *d_filters_pointer = D_FILTERS + inner*X_const2*C_BLOCK_GRAD2;
+            d_filters_pointer[0: X_const2*C_BLOCK_GRAD2] += local_scratch_pointer[0 : X_const2*C_BLOCK_GRAD2];
+        }
+    }
+#endif
+
+    } // pragma offload
+}
+
+void convolution_gradient_layer5(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_POOLED_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH){
+    assert(C == C_const5);
+    assert(H == H_const5);
+    assert(W == W_const5);
+    assert(K == K_const5);
+    assert(padding == padding_const5);
+    assert(X == X_const5);
+    assert(Y == Y_const5);
+    assert(output_H_const5 == (H_const5 + 2*padding_const5 - Y_const5 + 1)/stride_const5);
+    assert(output_W_const5 == (W_const5 + 2*padding_const5 - X_const5 + 1)/stride_const5);
+    assert(pooled_H_const5 == ceil((output_H_const5 - pooling_radius_const5 + 1.f)/pooling_stride_const5));
+    assert(pooled_W_const5 == ceil((output_W_const5 - pooling_radius_const5 + 1.f)/pooling_stride_const5));
+
+
+    #pragma offload target(mic:MIC_DEV) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(D_INPUTS:length(0) REUSE) \ 
+    in(FILTERS:length(0) REUSE) \ 
+    in(ARGMAXS:length(0) REUSE) \
+    in(D_POOLED_OUTPUTS:length(0) REUSE) \
+    in(D_FILTERS:length(0) REUSE) \
+    in(SCRATCH:length(0) REUSE)
+    {
+
+        int C_blocks = C_const5/C_BLOCK_GRAD5;
+        int Y_blocks = Y_const5/Y_BLOCK_GRAD5;
+        int N_blocks = N/N_BLOCK_GRAD5;
+        int H_blocks = output_H_const5/H_ARG_BLOCK_GRAD5;
+        int W_blocks = output_W_const5/W_ARG_BLOCK_GRAD5;
+    
+        omp_lock_t writelock[C_blocks*Y_blocks*16];
+
+        for(int i = 0; i < C_blocks*Y_blocks; i++)      
+            omp_init_lock(&writelock[16*i]);
+    
+        // double st = omp_get_wtime();
+        #pragma omp parallel for \
+        default(none) \
+        schedule(dynamic) \
+        shared(N, INPUTS, D_INPUTS, ARGMAXS, FILTERS, D_POOLED_OUTPUTS, D_FILTERS, SCRATCH, C_blocks, Y_blocks, N_blocks, H_blocks, W_blocks, writelock)
+        for (int outer = 0; outer < N_blocks * H_blocks * W_blocks * C_blocks * Y_blocks; outer++){
+            int n_block = outer / (H_blocks * W_blocks * C_blocks * Y_blocks);
+            int n = n_block*N_BLOCK_GRAD5;
+
+            int h_block = md(outer, H_blocks * W_blocks * C_blocks * Y_blocks) / (W_blocks * C_blocks * Y_blocks);
+            int h = h_block * H_ARG_BLOCK_GRAD5;
+
+            int w_block = md(outer, W_blocks * C_blocks * Y_blocks) / (C_blocks * Y_blocks);
+            int w = w_block * W_ARG_BLOCK_GRAD5;
+
+            int c_block = md(outer, C_blocks * Y_blocks) / (Y_blocks);
+            int c = c_block * C_BLOCK_GRAD5;
+
+            int y_block = md(outer, Y_blocks);
+            int y = y_block * Y_BLOCK_GRAD5;
+
+        int size_local_scratch = Y_BLOCK_GRAD5 * X_const5 * C_BLOCK_GRAD5;
+            float *restrict local_scratch = SCRATCH + ti7(n_block*H_blocks*W_blocks + h_block*W_blocks + w_block, c_block,  y_block,  0,      0,        0,       0, 
+                                                                                C_blocks, Y_blocks, K_const5, Y_BLOCK_GRAD5, X_const5, C_BLOCK_GRAD5);
+            local_scratch[ 0 : K_const5*Y_BLOCK_GRAD5*X_const5*C_BLOCK_GRAD5] = 0.f;
+            
+            float * restrict FILTERS_pointer_base = FILTERS + (c_block * Y_blocks + y_block) * K_const5*Y_BLOCK_GRAD5*X_const5*C_BLOCK_GRAD5;
+            // for each element in the pre-pooled outputs, find out whether it is an argmax 
+            for (int n_tot = n; n_tot < n + N_BLOCK_GRAD5; n_tot++){
+                for (int h_arg = h; h_arg < mn(h + H_ARG_BLOCK_GRAD5, output_H_const5); h_arg++){
+                    if ((y + h_arg - padding_const5 < 0) || (y + h_arg - padding_const5 >= H_const5)) continue;
+                    int h_start = mx((h_arg + pooling_stride_const5 - pooling_radius_const5)/pooling_stride_const5, 0); 
+                    int h_end = mn(h_arg/pooling_stride_const5, pooled_H_const5 - 1); 
+                    int h_inputs = h_arg + y - padding_const5;
+
+                    for (int w_arg = w; w_arg < mn(w + W_ARG_BLOCK_GRAD5, output_W_const5); w_arg++){
+                        int linear_index = h_arg*output_W_const5 + w_arg;
+
+                        // figure out the width of the window that is valid (i.e, not out-of-bounds for INPUTS)
+                        int x_invalid_left = mx(padding_const5 - w_arg, 0);
+                        int x_invalid_right = mx(w_arg - padding_const5 + X_const5 - W_const5, 0);
+                        int x_len = mx(X_const5 - x_invalid_left - x_invalid_right, 0);
+                        int x_len_aligned = x_len / 2 * 2;
+
+                        int w_start = mx((w_arg + pooling_stride_const5 - pooling_radius_const5)/pooling_stride_const5, 0);
+                        int w_end = mn(w_arg/pooling_stride_const5, pooled_W_const5 - 1);
+                        int w_inputs = mx(mn(w_arg - padding_const5, W_const5 - 1), 0);
+            
+            float * restrict INPUTS_pointer_base = INPUTS + ti5(n_tot,  c_block,  h_inputs,  w_inputs,   0, C_blocks,   H_const5,     W_const5, C_BLOCK_GRAD5);
+            float * restrict D_INPUTS_pointer_base = D_INPUTS + ti5(n_tot,  c_block,  h_inputs,  w_inputs,   0, C_blocks,   H_const5,     W_const5, C_BLOCK_GRAD5);
+                    int full_x_line = (x_len == X_const5);
+                    __declspec(aligned(64)) float pooled_outputs_coefficients[K_const5];
+                    __declspec(aligned(64)) int ks[K_const5];
+                    for(int i = 0; i < X_const5; i++) _mm_prefetch((char *)(INPUTS_pointer_base + i*16), _MM_HINT_T0); 
+                    if(full_x_line)
+                    {
+                            // scan over all windows in which this element appears
+                            for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
+                                    for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
+                                        int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const5, pooled_W_const5, K_const5);
+                                int cnt = K_const5;
+                                #if defined __MIC__
+                                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
+                                cnt = 0;
+                                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                                        for (int k = 0; k < K_const5; k+=16){
+                                        __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
+                                        __m512i v_ARGMAXS = _mm512_undefined_epi32();
+                                        __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
+                                        v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
+                                        v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
+                                        __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
+                                        _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
+                                        _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
+                                        cnt += _mm_countbits_32(m); 
+                                }
+                                #endif
+                                        for (int k2 = 0; k2 < cnt; k2++){
+                                                // if this (h_arg, w_arg) is the argmax of the window
+                                                int k = ks[k2];
+                                                float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
+                                            float * restrict local_scratch_pointer = local_scratch + k*size_local_scratch;
+                                            float * restrict local_scratch_pointer_next = local_scratch + ks[k2+1]*size_local_scratch;
+                                        float * restrict INPUTS_pointer = INPUTS_pointer_base;  
+                                        float * restrict D_INPUTS_pointer = D_INPUTS_pointer_base;  
+                                float * restrict FILTERS_pointer = FILTERS_pointer_base + k*size_local_scratch;
+                                float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ks[k2+1]*size_local_scratch;
+                                        #if (C_BLOCK_GRAD5 == 16) && (defined __MIC__)
+                                        __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
+                                        #pragma unroll (X_const5)
+                                        for(int i = 0; i < X_const5; i++)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + i*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + i*16), _MM_HINT_T0);
+                                                __m512 v_input_0 = _mm512_extload_ps(INPUTS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_0 = _mm512_extload_ps(D_INPUTS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_0 = _mm512_extload_ps(FILTERS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
+                                            v_d_input_0 = _mm512_fmadd_ps(v_filters_0, v_pooled_outputs_coefficient, v_d_input_0);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer), v_d_input_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                            local_scratch_pointer += 16;
+                                            INPUTS_pointer += 16;
+                                            FILTERS_pointer += 16;
+                                            D_INPUTS_pointer += 16;
+                                        }
+                                        #else
+                                        local_scratch_pointer[0 : x_len*C_BLOCK_GRAD5] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD5]; 
+                                        D_INPUTS_pointer[0 : x_len*C_BLOCK_GRAD5] += pooled_outputs_coefficient * FILTERS_pointer[0 : x_len*C_BLOCK_GRAD5]; 
+                                        #endif
+                                        } // k
+                                    } // w_pooled
+                            } // h_pooled
+                    }
+                    else
+                    {
+                            // scan over all windows in which this element appears
+                            for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
+                                    for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
+                                        int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const5, pooled_W_const5, K_const5);
+                                int cnt = K_const5;
+                                #if defined __MIC__
+                                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
+                                cnt = 0;
+                                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                                        for (int k = 0; k < K_const5; k+=16){
+                                        __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
+                                        __m512i v_ARGMAXS = _mm512_undefined_epi32();
+                                        __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
+                                        v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
+                                        v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
+                                        __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
+                                        _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
+                                        _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
+                                        cnt += _mm_countbits_32(m); 
+                                }
+                                #endif
+                                        for (int k2 = 0; k2 < cnt; k2++){
+                                                // if this (h_arg, w_arg) is the argmax of the window
+                                                int k = ks[k2];
+                                                float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
+                                            float * restrict local_scratch_pointer = local_scratch + ti(k,   0,   x_invalid_left,   0, Y_BLOCK_GRAD5,   X_const5,  C_BLOCK_GRAD5); 
+                                            float * restrict local_scratch_pointer_next = local_scratch + ti(ks[k2+1],  0,  0,   0, Y_BLOCK_GRAD5,   X_const5,     C_BLOCK_GRAD5);
+                                        float * restrict INPUTS_pointer = INPUTS_pointer_base;  
+                                        float * restrict D_INPUTS_pointer = D_INPUTS_pointer_base;  
+                                // float * restrict FILTERS_pointer = FILTERS_pointer_base + k*size_local_scratch;
+                                // float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ks[k2+1]*size_local_scratch;
+                                float * restrict FILTERS_pointer = FILTERS_pointer_base + ti(k,   0,   x_invalid_left,   0, Y_BLOCK_GRAD5,   X_const5,  C_BLOCK_GRAD5);
+                                float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ti(ks[k2+1],  0,  0,   0, Y_BLOCK_GRAD5,   X_const5,     C_BLOCK_GRAD5);
+                                        #if (C_BLOCK_GRAD5 == 16) && defined __MIC__
+                                        __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
+                                        for(int x = 0; x < x_len_aligned; x+=2)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16 + 16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16), _MM_HINT_T0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16 + 16), _MM_HINT_T0);
+                                                __m512 v_input_0   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD5, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_input_1   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD5 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_0 = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD5, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_1 = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD5 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD5, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_1 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD5 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_0 = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD5, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_1 = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD5 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
+                                            v_scratch_1 = _mm512_fmadd_ps(v_input_1, v_pooled_outputs_coefficient, v_scratch_1);
+                                            v_d_input_0 = _mm512_fmadd_ps(v_filters_0, v_pooled_outputs_coefficient, v_d_input_0);
+                                            v_d_input_1 = _mm512_fmadd_ps(v_filters_1, v_pooled_outputs_coefficient, v_d_input_1);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD5 ), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD5 + 16), v_scratch_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD5 ), v_d_input_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD5 + 16), v_d_input_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                        }
+                                        for(int x = x_len_aligned; x < x_len; x++)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16), _MM_HINT_T0);
+                                                __m512 v_input   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD5, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD5, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD5, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD5, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch = _mm512_fmadd_ps(v_input, v_pooled_outputs_coefficient, v_scratch);
+                                            v_d_input = _mm512_fmadd_ps(v_filters, v_pooled_outputs_coefficient, v_d_input);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD5), v_scratch, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD5 ), v_d_input, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                        }
+                                        #else
+                                                    local_scratch_pointer[0 : x_len*C_BLOCK_GRAD5] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD5]; 
+                                        D_INPUTS_pointer[0 : x_len*C_BLOCK_GRAD5] += pooled_outputs_coefficient * FILTERS_pointer[0 : x_len*C_BLOCK_GRAD5]; 
+                                        #endif
+                                        } // k
+                                    } // w_pooled
+                            } // h_pooled
+                    }
+                      
+                    } // w_arg
+                } // h_arg
+            } // nn
+
+            omp_set_lock(&writelock[16*c_block*y_block]);
+            {
+            D_FILTERS[(c_block * Y_blocks + y_block) * K_const5*Y_BLOCK_GRAD5*X_const5*C_BLOCK_GRAD5 : K_const5*Y_BLOCK_GRAD5*X_const5*C_BLOCK_GRAD5] += local_scratch[ 0 : K_const5*Y_BLOCK_GRAD5*X_const5*C_BLOCK_GRAD5];
+            }
+            omp_unset_lock(&writelock[16*c_block*y_block]);
+
+        } // outer
+        // double end = omp_get_wtime();
+        // printf("Time first loop = %.5lf\n", (end - st));
+
+#if 0
+        for (int outer = 0; outer < N_blocks * H_blocks * W_blocks ; outer++){
+        #pragma omp parallel for schedule(dynamic)  
+        for(int inner = 0; inner < C_blocks*Y_blocks*K_const2*Y_BLOCK_GRAD2; inner++)
+        {
+            float *local_scratch_pointer = SCRATCH + outer*C_blocks*Y_blocks*K_const2*Y_BLOCK_GRAD2*X_const2*C_BLOCK_GRAD2 + inner*X_const2*C_BLOCK_GRAD2;
+            float *d_filters_pointer = D_FILTERS + inner*X_const2*C_BLOCK_GRAD2;
+            d_filters_pointer[0: X_const2*C_BLOCK_GRAD2] += local_scratch_pointer[0 : X_const2*C_BLOCK_GRAD2];
+        }
+    }
+#endif
+
+    } // pragma offload
+}
+
+void convolution_gradient_layer6(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_POOLED_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH){
+    assert(C == C_const6);
+    assert(H == H_const6);
+    assert(W == W_const6);
+    assert(K == K_const6);
+    assert(padding == padding_const6);
+    assert(X == X_const6);
+    assert(Y == Y_const6);
+    assert(output_H_const6 == (H_const6 + 2*padding_const6 - Y_const6 + 1)/stride_const6);
+    assert(output_W_const6 == (W_const6 + 2*padding_const6 - X_const6 + 1)/stride_const6);
+    assert(pooled_H_const6 == ceil((output_H_const6 - pooling_radius_const6 + 1.f)/pooling_stride_const6));
+    assert(pooled_W_const6 == ceil((output_W_const6 - pooling_radius_const6 + 1.f)/pooling_stride_const6));
+
+
+    #pragma offload target(mic:MIC_DEV) \ 
+    in(INPUTS:length(0) REUSE) \ 
+    in(D_INPUTS:length(0) REUSE) \ 
+    in(FILTERS:length(0) REUSE) \ 
+    in(ARGMAXS:length(0) REUSE) \
+    in(D_POOLED_OUTPUTS:length(0) REUSE) \
+    in(D_FILTERS:length(0) REUSE) \
+    in(SCRATCH:length(0) REUSE)
+    {
+
+        int C_blocks = C_const6/C_BLOCK_GRAD6;
+        int Y_blocks = Y_const6/Y_BLOCK_GRAD6;
+        int N_blocks = N/N_BLOCK_GRAD6;
+        int H_blocks = output_H_const6/H_ARG_BLOCK_GRAD6;
+        int W_blocks = output_W_const6/W_ARG_BLOCK_GRAD6;
+    
+        omp_lock_t writelock[C_blocks*Y_blocks*16];
+
+        for(int i = 0; i < C_blocks*Y_blocks; i++)      
+            omp_init_lock(&writelock[16*i]);
+    
+        // double st = omp_get_wtime();
+        #pragma omp parallel for \
+        default(none) \
+        schedule(dynamic) \
+        shared(N, INPUTS, D_INPUTS, ARGMAXS, FILTERS, D_POOLED_OUTPUTS, D_FILTERS, SCRATCH, C_blocks, Y_blocks, N_blocks, H_blocks, W_blocks, writelock)
+        for (int outer = 0; outer < N_blocks * H_blocks * W_blocks * C_blocks * Y_blocks; outer++){
+            int n_block = outer / (H_blocks * W_blocks * C_blocks * Y_blocks);
+            int n = n_block*N_BLOCK_GRAD6;
+
+            int h_block = md(outer, H_blocks * W_blocks * C_blocks * Y_blocks) / (W_blocks * C_blocks * Y_blocks);
+            int h = h_block * H_ARG_BLOCK_GRAD6;
+
+            int w_block = md(outer, W_blocks * C_blocks * Y_blocks) / (C_blocks * Y_blocks);
+            int w = w_block * W_ARG_BLOCK_GRAD6;
+
+            int c_block = md(outer, C_blocks * Y_blocks) / (Y_blocks);
+            int c = c_block * C_BLOCK_GRAD6;
+
+            int y_block = md(outer, Y_blocks);
+            int y = y_block * Y_BLOCK_GRAD6;
+
+        int size_local_scratch = Y_BLOCK_GRAD6 * X_const6 * C_BLOCK_GRAD6;
+            float *restrict local_scratch = SCRATCH + ti7(n_block*H_blocks*W_blocks + h_block*W_blocks + w_block, c_block,  y_block,  0,      0,        0,       0, 
+                                                                                C_blocks, Y_blocks, K_const6, Y_BLOCK_GRAD6, X_const6, C_BLOCK_GRAD6);
+            local_scratch[ 0 : K_const6*Y_BLOCK_GRAD6*X_const6*C_BLOCK_GRAD6] = 0.f;
+            
+            float * restrict FILTERS_pointer_base = FILTERS + (c_block * Y_blocks + y_block) * K_const6*Y_BLOCK_GRAD6*X_const6*C_BLOCK_GRAD6;
+            // for each element in the pre-pooled outputs, find out whether it is an argmax 
+            for (int n_tot = n; n_tot < n + N_BLOCK_GRAD6; n_tot++){
+                for (int h_arg = h; h_arg < mn(h + H_ARG_BLOCK_GRAD6, output_H_const6); h_arg++){
+                    if ((y + h_arg - padding_const6 < 0) || (y + h_arg - padding_const6 >= H_const6)) continue;
+                    int h_start = mx((h_arg + pooling_stride_const6 - pooling_radius_const6)/pooling_stride_const6, 0); 
+                    int h_end = mn(h_arg/pooling_stride_const6, pooled_H_const6 - 1); 
+                    int h_inputs = h_arg + y - padding_const6;
+
+                    for (int w_arg = w; w_arg < mn(w + W_ARG_BLOCK_GRAD6, output_W_const6); w_arg++){
+                        int linear_index = h_arg*output_W_const6 + w_arg;
+
+                        // figure out the width of the window that is valid (i.e, not out-of-bounds for INPUTS)
+                        int x_invalid_left = mx(padding_const6 - w_arg, 0);
+                        int x_invalid_right = mx(w_arg - padding_const6 + X_const6 - W_const6, 0);
+                        int x_len = mx(X_const6 - x_invalid_left - x_invalid_right, 0);
+                        int x_len_aligned = x_len / 2 * 2;
+
+                        int w_start = mx((w_arg + pooling_stride_const6 - pooling_radius_const6)/pooling_stride_const6, 0);
+                        int w_end = mn(w_arg/pooling_stride_const6, pooled_W_const6 - 1);
+                        int w_inputs = mx(mn(w_arg - padding_const6, W_const6 - 1), 0);
+            
+            float * restrict INPUTS_pointer_base = INPUTS + ti5(n_tot,  c_block,  h_inputs,  w_inputs,   0, C_blocks,   H_const6,     W_const6, C_BLOCK_GRAD6);
+            float * restrict D_INPUTS_pointer_base = D_INPUTS + ti5(n_tot,  c_block,  h_inputs,  w_inputs,   0, C_blocks,   H_const6,     W_const6, C_BLOCK_GRAD6);
+                    int full_x_line = (x_len == X_const6);
+                    __declspec(aligned(64)) float pooled_outputs_coefficients[K_const6];
+                    __declspec(aligned(64)) int ks[K_const6];
+                    for(int i = 0; i < X_const6; i++) _mm_prefetch((char *)(INPUTS_pointer_base + i*16), _MM_HINT_T0); 
+                    if(full_x_line)
+                    {
+                            // scan over all windows in which this element appears
+                            for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
+                                    for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
+                                        int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const6, pooled_W_const6, K_const6);
+                                int cnt = K_const6;
+                                #if defined __MIC__
+                                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
+                                cnt = 0;
+                                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                                        for (int k = 0; k < K_const6; k+=16){
+                                        __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
+                                        __m512i v_ARGMAXS = _mm512_undefined_epi32();
+                                        __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
+                                        v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
+                                        v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
+                                        __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
+                                        _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
+                                        _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
+                                        cnt += _mm_countbits_32(m); 
+                                }
+                                #endif
+                                        for (int k2 = 0; k2 < cnt; k2++){
+                                                // if this (h_arg, w_arg) is the argmax of the window
+                                                int k = ks[k2];
+                                                float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
+                                            float * restrict local_scratch_pointer = local_scratch + k*size_local_scratch;
+                                            float * restrict local_scratch_pointer_next = local_scratch + ks[k2+1]*size_local_scratch;
+                                        float * restrict INPUTS_pointer = INPUTS_pointer_base;  
+                                        float * restrict D_INPUTS_pointer = D_INPUTS_pointer_base;  
+                                float * restrict FILTERS_pointer = FILTERS_pointer_base + k*size_local_scratch;
+                                float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ks[k2+1]*size_local_scratch;
+                                        #if (C_BLOCK_GRAD6 == 16) && (defined __MIC__)
+                                        __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
+                                        #pragma unroll (X_const6)
+                                        for(int i = 0; i < X_const6; i++)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + i*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + i*16), _MM_HINT_T0);
+                                                __m512 v_input_0 = _mm512_extload_ps(INPUTS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_0 = _mm512_extload_ps(D_INPUTS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_0 = _mm512_extload_ps(FILTERS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
+                                            v_d_input_0 = _mm512_fmadd_ps(v_filters_0, v_pooled_outputs_coefficient, v_d_input_0);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer), v_d_input_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                            local_scratch_pointer += 16;
+                                            INPUTS_pointer += 16;
+                                            FILTERS_pointer += 16;
+                                            D_INPUTS_pointer += 16;
+                                        }
+                                        #else
+                                        local_scratch_pointer[0 : x_len*C_BLOCK_GRAD6] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD6]; 
+                                        D_INPUTS_pointer[0 : x_len*C_BLOCK_GRAD6] += pooled_outputs_coefficient * FILTERS_pointer[0 : x_len*C_BLOCK_GRAD6]; 
+                                        #endif
+                                        } // k
+                                    } // w_pooled
+                            } // h_pooled
+                    }
+                    else
+                    {
+                            // scan over all windows in which this element appears
+                            for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
+                                    for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
+                                        int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const6, pooled_W_const6, K_const6);
+                                int cnt = K_const6;
+                                #if defined __MIC__
+                                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
+                                cnt = 0;
+                                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                                        for (int k = 0; k < K_const6; k+=16){
+                                        __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
+                                        __m512i v_ARGMAXS = _mm512_undefined_epi32();
+                                        __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
+                                        v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
+                                        v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
+                                        __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
+                                        _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
+                                        _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
+                                        cnt += _mm_countbits_32(m); 
+                                }
+                                #endif
+                                        for (int k2 = 0; k2 < cnt; k2++){
+                                                // if this (h_arg, w_arg) is the argmax of the window
+                                                int k = ks[k2];
+                                                float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
+                                            float * restrict local_scratch_pointer = local_scratch + ti(k,   0,   x_invalid_left,   0, Y_BLOCK_GRAD6,   X_const6,  C_BLOCK_GRAD6); 
+                                            float * restrict local_scratch_pointer_next = local_scratch + ti(ks[k2+1],  0,  0,   0, Y_BLOCK_GRAD6,   X_const6,     C_BLOCK_GRAD6);
+                                        float * restrict INPUTS_pointer = INPUTS_pointer_base;  
+                                        float * restrict D_INPUTS_pointer = D_INPUTS_pointer_base;  
+                                // float * restrict FILTERS_pointer = FILTERS_pointer_base + k*size_local_scratch;
+                                // float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ks[k2+1]*size_local_scratch;
+                                float * restrict FILTERS_pointer = FILTERS_pointer_base + ti(k,   0,   x_invalid_left,   0, Y_BLOCK_GRAD6,   X_const6,  C_BLOCK_GRAD6);
+                                float * restrict FILTERS_pointer_next = FILTERS_pointer_base + ti(ks[k2+1],  0,  0,   0, Y_BLOCK_GRAD6,   X_const6,     C_BLOCK_GRAD6);
+                                        #if (C_BLOCK_GRAD6 == 16) && defined __MIC__
+                                        __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
+                                        for(int x = 0; x < x_len_aligned; x+=2)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16 + 16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16), _MM_HINT_T0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16 + 16), _MM_HINT_T0);
+                                                __m512 v_input_0   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD6, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_input_1   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD6 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_0 = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD6, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input_1 = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD6 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD6, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_1 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD6 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_0 = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD6, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters_1 = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD6 + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
+                                            v_scratch_1 = _mm512_fmadd_ps(v_input_1, v_pooled_outputs_coefficient, v_scratch_1);
+                                            v_d_input_0 = _mm512_fmadd_ps(v_filters_0, v_pooled_outputs_coefficient, v_d_input_0);
+                                            v_d_input_1 = _mm512_fmadd_ps(v_filters_1, v_pooled_outputs_coefficient, v_d_input_1);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD6 ), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD6 + 16), v_scratch_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD6 ), v_d_input_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD6 + 16), v_d_input_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                        }
+                                        for(int x = x_len_aligned; x < x_len; x++)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(FILTERS_pointer_next + x*16), _MM_HINT_T0);
+                                                __m512 v_input   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD6, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_d_input = _mm512_extload_ps(D_INPUTS_pointer + x*C_BLOCK_GRAD6, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD6, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_filters = _mm512_extload_ps(FILTERS_pointer + x*C_BLOCK_GRAD6, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch = _mm512_fmadd_ps(v_input, v_pooled_outputs_coefficient, v_scratch);
+                                            v_d_input = _mm512_fmadd_ps(v_filters, v_pooled_outputs_coefficient, v_d_input);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD6), v_scratch, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(D_INPUTS_pointer + x*C_BLOCK_GRAD6 ), v_d_input, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                        }
+                                        #else
+                                                    local_scratch_pointer[0 : x_len*C_BLOCK_GRAD6] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD6]; 
+                                        D_INPUTS_pointer[0 : x_len*C_BLOCK_GRAD6] += pooled_outputs_coefficient * FILTERS_pointer[0 : x_len*C_BLOCK_GRAD6]; 
+                                        #endif
+                                        } // k
+                                    } // w_pooled
+                            } // h_pooled
+                    }
+                      
+                    } // w_arg
+                } // h_arg
+            } // nn
+
+            omp_set_lock(&writelock[16*c_block*y_block]);
+            {
+            D_FILTERS[(c_block * Y_blocks + y_block) * K_const6*Y_BLOCK_GRAD6*X_const6*C_BLOCK_GRAD6 : K_const6*Y_BLOCK_GRAD6*X_const6*C_BLOCK_GRAD6] += local_scratch[ 0 : K_const6*Y_BLOCK_GRAD6*X_const6*C_BLOCK_GRAD6];
+            }
+            omp_unset_lock(&writelock[16*c_block*y_block]);
+
+        } // outer
+        // double end = omp_get_wtime();
+        // printf("Time first loop = %.5lf\n", (end - st));
+
+#if 0
+        for (int outer = 0; outer < N_blocks * H_blocks * W_blocks ; outer++){
+        #pragma omp parallel for schedule(dynamic)  
+        for(int inner = 0; inner < C_blocks*Y_blocks*K_const2*Y_BLOCK_GRAD2; inner++)
+        {
+            float *local_scratch_pointer = SCRATCH + outer*C_blocks*Y_blocks*K_const2*Y_BLOCK_GRAD2*X_const2*C_BLOCK_GRAD2 + inner*X_const2*C_BLOCK_GRAD2;
+            float *d_filters_pointer = D_FILTERS + inner*X_const2*C_BLOCK_GRAD2;
+            d_filters_pointer[0: X_const2*C_BLOCK_GRAD2] += local_scratch_pointer[0 : X_const2*C_BLOCK_GRAD2];
+        }
+    }
+#endif
+
+    } // pragma offload
+}
+
+
+// INPUTS data structure [N, C/C_BLOCK, H, W, C_BLOCK]
+// D_FILTERS/FILTERS data structure [K, Y, X, C]
+// ARGMAXS/OUTPUTS/D_POOLED_OUTPUTS data structure [N, pooled_H, pooled_W, K]
+// void convolution_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_POOLED_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH){
+//     assert(C == C_const);
+//     assert(H == H_const);
+//     assert(W == W_const);
+//     assert(K == K_const);
+//     assert(padding == padding_const);
+//     assert(X == X_const);
+//     assert(Y == Y_const);
+//     assert(output_H_const == (H_const + 2*padding_const - Y_const + 1)/stride_const);
+//     assert(output_W_const == (W_const + 2*padding_const - X_const + 1)/stride_const);
+//     assert(pooled_H_const == ceil((output_H_const - pooling_radius_const + 1.f)/pooling_stride_const));
+//     assert(pooled_W_const == ceil((output_W_const - pooling_radius_const + 1.f)/pooling_stride_const));
+
+
+//     #pragma offload target(mic:MIC_DEV) \ 
+//     in(INPUTS:length(0) REUSE) \ 
+//     in(FILTERS:length(0) REUSE) \ 
+//     in(ARGMAXS:length(0) REUSE) \
+//     in(D_POOLED_OUTPUTS:length(0) REUSE) \
+//     in(D_FILTERS:length(0) REUSE) \
+//     in(SCRATCH:length(0) REUSE)
+//     {
+
+//         int C_blocks = C_const/C_BLOCK_GRAD;
+//         int Y_blocks = Y_const/Y_BLOCK_GRAD;
+//         int N_blocks = N/N_BLOCK_GRAD;
+//         int H_blocks = output_H_const/H_ARG_BLOCK_GRAD;
+//         int W_blocks = output_W_const/W_ARG_BLOCK_GRAD;
+
+//         SCRATCH[0 : omp_get_max_threads()*C_blocks*Y_blocks*K_const*Y_BLOCK_GRAD*X_const*C_BLOCK_GRAD] = 0.f;
+
+//         #pragma omp parallel for \
+//         default(none) \
+//         schedule(dynamic) \
+//         shared(N, INPUTS, ARGMAXS, FILTERS, D_POOLED_OUTPUTS, D_FILTERS, SCRATCH, C_blocks, Y_blocks, N_blocks, H_blocks, W_blocks)
+
+//         for (int outer = 0; outer < N_blocks * H_blocks * W_blocks * C_blocks * Y_blocks; outer++){
+//             int n_block = outer / (H_blocks * W_blocks * C_blocks * Y_blocks);
+//             int n = n_block*N_BLOCK_GRAD;
+
+//             int h_block = md(outer, H_blocks * W_blocks * C_blocks * Y_blocks) / (W_blocks * C_blocks * Y_blocks);
+//             int h = h_block * H_ARG_BLOCK_GRAD;
+
+//             int w_block = md(outer, W_blocks * C_blocks * Y_blocks) / (C_blocks * Y_blocks);
+//             int w = w_block * W_ARG_BLOCK_GRAD;
+
+//             int c_block = md(outer, C_blocks * Y_blocks) / (Y_blocks);
+//             int c = c_block * C_BLOCK_GRAD;
+
+//             int y_block = md(outer, Y_blocks);
+//             int y = y_block * Y_BLOCK_GRAD;
+
+//             assert(outer == ti5(n_block, h_block, w_block, c_block, y_block, H_blocks, W_blocks, C_blocks, Y_blocks));
+
+//             float *restrict local_scratch = SCRATCH + ti7(omp_get_thread_num(), c_block,  y_block,  0,      0,        0,       0, 
+//                                                                                 C_blocks, Y_blocks, K_const, Y_BLOCK_GRAD, X_const, C_BLOCK_GRAD);
+
+//             // for each element in the pre-pooled outputs, find out whether it is an argmax 
+//             for (int n_tot = n; n_tot < n + N_BLOCK_GRAD; n_tot++){
+//                 for (int h_arg = h; h_arg < mn(h + H_ARG_BLOCK_GRAD, output_H_const); h_arg++){
+//                     for (int w_arg = w; w_arg < mn(w + W_ARG_BLOCK_GRAD, output_W_const); w_arg++){
+
+//                         int linear_index = h_arg*output_W_const + w_arg;
+
+//                         int h_start = mx((h_arg + pooling_stride_const - pooling_radius_const)/pooling_stride_const, 0); // ceil((h_arg - pooling_radius + 1)/pooling_stride)
+//                         int w_start = mx((w_arg + pooling_stride_const - pooling_radius_const)/pooling_stride_const, 0);
+
+//                         int h_end = mn(h_arg/pooling_stride_const, pooled_H_const - 1); // floor(h_arg/pooling_stride_const)
+//                         int w_end = mn(w_arg/pooling_stride_const, pooled_W_const - 1);
+                    
+//                         // scan over all windows in which this element appears
+//                         for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
+//                             for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
+//                         // for (int h_pooled = 0; h_pooled < pooled_H_const; h_pooled++){
+//                             // for (int w_pooled = 0; w_pooled < pooled_W_const; w_pooled++){
+//                                 for (int k = 0; k < K_const; k++){
+
+//                                     int pooled_index = ti(n_tot, h_pooled, w_pooled, k, pooled_H_const, pooled_W_const, K_const);
+
+//                                     // if this (h_arg, w_arg) is the argmax of the window
+//                                     if (ARGMAXS[pooled_index] == linear_index){
+//                                         float pooled_outputs_coefficient = D_POOLED_OUTPUTS[pooled_index];
+
+//                                         // figure out the width of the window that is valid (i.e, not out-of-bounds for INPUTS)
+//                                         int x_invalid_left = mx(padding_const - w_arg, 0);
+//                                         int x_invalid_right = mx(w_arg - padding_const + X_const - W_const, 0);
+//                                         int x_len = mx(X_const - x_invalid_left - x_invalid_right, 0);
+                                        
+//                                         int w_inputs = mx(mn(w_arg - padding_const, W_const - 1), 0);
+                                        
+//                                         for (int yy = 0; yy < Y_BLOCK_GRAD; yy++){
+//                                             if ((y + yy + h_arg - padding_const >= 0) && (y + yy + h_arg - padding_const < H_const)){
+//                                                 int h_inputs = h_arg + y + yy - padding_const;
+                                              
+//                                                 local_scratch[ti(k,   yy,        x_invalid_left,   0, 
+//                                                                       Y_BLOCK_GRAD,   X_const,          C_BLOCK_GRAD) : x_len*C_BLOCK_GRAD] += 
+//                                                     pooled_outputs_coefficient *
+//                                                     INPUTS[ti5(n_tot,  c_block,    h_inputs,    w_inputs,   0, 
+//                                                                        C_blocks,   H_const,     W_const,    C_BLOCK_GRAD) : x_len*C_BLOCK_GRAD];
+//                                             } // if
+//                                         } //yy
+//                                     } // if
+
+//                                 } // k
+//                             } // w_pooled
+//                         } // h_pooled
+                      
+//                     } // w_arg
+//                 } // h_arg
+//             } // nn
+
+//         } // outer
+
+
+//         for (int thread = 0; thread < omp_get_max_threads(); thread++){
+
+//             #pragma omp parallel for
+//             for (int k = 0; k < K_const; k++){
+//                 for (int c_block = 0; c_block < C_blocks; c_block++){
+//                     int c = c_block*C_BLOCK_GRAD;
+
+//                     for (int y = 0; y < Y_const; y++){
+//                         int y_block = y / Y_BLOCK_GRAD;
+//                         int yy = md(y, Y_BLOCK_GRAD);
+
+//                         for (int x = 0; x < X_const; x++){
+//                             D_FILTERS[ti(k, y, x, c, Y_const, X_const, C_const) : C_BLOCK_GRAD] += 
+//                              SCRATCH[ti7(thread,  c_block,  y_block,  k,       yy,      x,       0, 
+//                                                   C_blocks, Y_blocks, K_const, Y_BLOCK_GRAD, X_const, C_BLOCK_GRAD) : C_BLOCK_GRAD];
+//                         }
+
+//                     }
+//                 }
+//             }
+//         }
+
+//     } // pragma offload
+// }
+
+void convolution_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_POOLED_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH){
     assert(C == C_const);
     assert(H == H_const);
     assert(W == W_const);
@@ -915,12 +3272,12 @@ void convolution_gradient_layer2(int N, int C, int H, int W, float *INPUTS, int 
         int H_blocks = output_H_const/H_ARG_BLOCK_GRAD;
         int W_blocks = output_W_const/W_ARG_BLOCK_GRAD;
     
-    omp_lock_t writelock[C_BLOCK_GRAD*Y_BLOCK_GRAD*16];
+        omp_lock_t writelock[C_blocks*Y_blocks*16];
 
-        for(int i = 0; i < C_BLOCK_GRAD*Y_BLOCK_GRAD; i++)      
+        for(int i = 0; i < C_blocks*Y_blocks; i++)      
             omp_init_lock(&writelock[16*i]);
     
-    double st = omp_get_wtime();
+        // double st = omp_get_wtime();
         #pragma omp parallel for \
         default(none) \
         schedule(dynamic) \
@@ -944,9 +3301,9 @@ void convolution_gradient_layer2(int N, int C, int H, int W, float *INPUTS, int 
         int size_local_scratch = Y_BLOCK_GRAD * X_const * C_BLOCK_GRAD;
             float *restrict local_scratch = SCRATCH + ti7(n_block*H_blocks*W_blocks + h_block*W_blocks + w_block, c_block,  y_block,  0,      0,        0,       0, 
                                                                                 C_blocks, Y_blocks, K_const, Y_BLOCK_GRAD, X_const, C_BLOCK_GRAD);
-        local_scratch[ 0 : K_const*Y_BLOCK_GRAD*X_const*C_BLOCK_GRAD] = 0.f;
+            local_scratch[ 0 : K_const*Y_BLOCK_GRAD*X_const*C_BLOCK_GRAD] = 0.f;
             
-        // for each element in the pre-pooled outputs, find out whether it is an argmax 
+            // for each element in the pre-pooled outputs, find out whether it is an argmax 
             for (int n_tot = n; n_tot < n + N_BLOCK_GRAD; n_tot++){
                 for (int h_arg = h; h_arg < mn(h + H_ARG_BLOCK_GRAD, output_H_const); h_arg++){
                     if ((y + h_arg - padding_const < 0) || (y + h_arg - padding_const >= H_const)) continue;
@@ -966,141 +3323,144 @@ void convolution_gradient_layer2(int N, int C, int H, int W, float *INPUTS, int 
                         int w_start = mx((w_arg + pooling_stride_const - pooling_radius_const)/pooling_stride_const, 0);
                         int w_end = mn(w_arg/pooling_stride_const, pooled_W_const - 1);
                         int w_inputs = mx(mn(w_arg - padding_const, W_const - 1), 0);
+            
             float * restrict INPUTS_pointer_base = INPUTS + ti5(n_tot,  c_block,  h_inputs,  w_inputs,   0, C_blocks,   H_const,     W_const, C_BLOCK_GRAD);
-            int full_x_line = (x_len == X_const);
-            __declspec(aligned(64)) float pooled_outputs_coefficients[K_const];
-            __declspec(aligned(64)) int ks[K_const];
-            for(int i = 0; i < X_const; i++) _mm_prefetch((char *)(INPUTS_pointer_base + i*16), _MM_HINT_T0); 
-            if(full_x_line)
-            {
-                        // scan over all windows in which this element appears
-                        for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
-                            for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
-                                int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const, pooled_W_const, K_const);
-                int cnt = K_const;
-                #if defined __MIC__
-                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
-                cnt = 0;
-                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-                                for (int k = 0; k < K_const; k+=16){
-                    __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
-                    __m512i v_ARGMAXS = _mm512_undefined_epi32();
-                    __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
-                    v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
-                    v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
-                    __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
-                    v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
-                    v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
-                    _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
-                    _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
-                    _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
-                    _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
-                    cnt += _mm_countbits_32(m); 
-                }
-                #endif
-                                for (int k2 = 0; k2 < cnt; k2++){
-                                    // if this (h_arg, w_arg) is the argmax of the window
-                                    int k = ks[k2];
-                                    float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
-                            float * restrict local_scratch_pointer = local_scratch + k*size_local_scratch;
-                            float * restrict local_scratch_pointer_next = local_scratch + ks[k2+1]*size_local_scratch;
-                    float * restrict INPUTS_pointer = INPUTS_pointer_base;  
-                    #if (C_BLOCK_GRAD == 16) && (defined __MIC__)
-                    __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
-                    #pragma unroll (X_const)
-                    for(int i = 0; i < X_const; i++)
+                    int full_x_line = (x_len == X_const);
+                    __declspec(aligned(64)) float pooled_outputs_coefficients[K_const];
+                    __declspec(aligned(64)) int ks[K_const];
+                    for(int i = 0; i < X_const; i++) _mm_prefetch((char *)(INPUTS_pointer_base + i*16), _MM_HINT_T0); 
+                    if(full_x_line)
                     {
-                            _mm_prefetch((char *)(local_scratch_pointer_next + i*16), _MM_HINT_ET0);
-                                __m512 v_input_0 = _mm512_extload_ps(INPUTS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                        v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
-                                _mm512_extstore_ps((float *)(local_scratch_pointer), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
-                        local_scratch_pointer += 16;
-                        INPUTS_pointer += 16;
+                            // scan over all windows in which this element appears
+                            for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
+                                    for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
+                                        int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const, pooled_W_const, K_const);
+                                int cnt = K_const;
+                                #if defined __MIC__
+                                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
+                                cnt = 0;
+                                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                                        for (int k = 0; k < K_const; k+=16){
+                                        __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
+                                        __m512i v_ARGMAXS = _mm512_undefined_epi32();
+                                        __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
+                                        v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
+                                        v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
+                                        __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
+                                        _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
+                                        _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
+                                        cnt += _mm_countbits_32(m); 
+                                }
+                                #endif
+                                        for (int k2 = 0; k2 < cnt; k2++){
+                                                // if this (h_arg, w_arg) is the argmax of the window
+                                                int k = ks[k2];
+                                                float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
+                                            float * restrict local_scratch_pointer = local_scratch + k*size_local_scratch;
+                                            float * restrict local_scratch_pointer_next = local_scratch + ks[k2+1]*size_local_scratch;
+                                        float * restrict INPUTS_pointer = INPUTS_pointer_base;  
+                                        #if (C_BLOCK_GRAD == 16) && (defined __MIC__)
+                                        __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
+                                        #pragma unroll (X_const)
+                                        for(int i = 0; i < X_const; i++)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + i*16), _MM_HINT_ET0);
+                                                __m512 v_input_0 = _mm512_extload_ps(INPUTS_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                            local_scratch_pointer += 16;
+                                            INPUTS_pointer += 16;
+                                        }
+                                        #else
+                                        local_scratch_pointer[0 : x_len*C_BLOCK_GRAD] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD]; 
+                                        #endif
+                                        } // k
+                                    } // w_pooled
+                            } // h_pooled
                     }
-                    #else
-                                            local_scratch_pointer[0 : x_len*C_BLOCK_GRAD] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD]; 
-                    #endif
-                                } // k
-                            } // w_pooled
-                        } // h_pooled
-            }
-            else
-            {
-                        // scan over all windows in which this element appears
-                        for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
-                            for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
-                                int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const, pooled_W_const, K_const);
-                int cnt = K_const;
-                #if defined __MIC__
-                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
-                cnt = 0;
-                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-                                for (int k = 0; k < K_const; k+=16){
-                    __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
-                    __m512i v_ARGMAXS = _mm512_undefined_epi32();
-                    __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
-                    v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
-                    v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
-                    v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
-                    v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
-                    __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
-                    _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
-                    _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
-                    _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
-                    _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
-                    cnt += _mm_countbits_32(m); 
-                }
-                #endif
-                                for (int k2 = 0; k2 < cnt; k2++){
-                                    // if this (h_arg, w_arg) is the argmax of the window
-                                    int k = ks[k2];
-                                    float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
-                            float * restrict local_scratch_pointer = local_scratch + ti(k,   0,   x_invalid_left,   0, Y_BLOCK_GRAD,   X_const,  C_BLOCK_GRAD); 
-                            float * restrict local_scratch_pointer_next = local_scratch + ti(ks[k2+1],  0,  0,   0, Y_BLOCK_GRAD,   X_const,     C_BLOCK_GRAD);
-                    float * restrict INPUTS_pointer = INPUTS_pointer_base;  
-                    #if (C_BLOCK_GRAD == 16) && defined __MIC__
-                    __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
-                    for(int x = 0; x < x_len_aligned; x+=2)
+                    else
                     {
-                            _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
-                            _mm_prefetch((char *)(local_scratch_pointer_next + x*16 + 16), _MM_HINT_ET0);
-                                __m512 v_input_0   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                                __m512 v_input_1   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                                __m512 v_scratch_1 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                        v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
-                        v_scratch_1 = _mm512_fmadd_ps(v_input_1, v_pooled_outputs_coefficient, v_scratch_1);
-                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD ), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
-                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD + 16), v_scratch_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                            // scan over all windows in which this element appears
+                            for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
+                                    for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
+                                        int pooled_index = ti(n_tot, h_pooled, w_pooled, 0, pooled_H_const, pooled_W_const, K_const);
+                                int cnt = K_const;
+                                #if defined __MIC__
+                                __m512i v_linear_index = _mm512_set1_epi32(linear_index);
+                                cnt = 0;
+                                __m512i v_0to15 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                                        for (int k = 0; k < K_const; k+=16){
+                                        __m512i v_k = _mm512_add_epi32(v_0to15, _mm512_set1_epi32(k));
+                                        __m512i v_ARGMAXS = _mm512_undefined_epi32();
+                                        __m512 v_D_POOLED_OUTPUTS = _mm512_undefined_ps();
+                                        v_ARGMAXS = _mm512_loadunpacklo_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k);
+                                        v_ARGMAXS = _mm512_loadunpackhi_epi32(v_ARGMAXS, ARGMAXS + pooled_index + k + 16);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpacklo_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k);
+                                        v_D_POOLED_OUTPUTS = _mm512_loadunpackhi_ps(v_D_POOLED_OUTPUTS, D_POOLED_OUTPUTS + pooled_index + k + 16);
+                                        __mmask16 m = _mm512_cmpeq_epi32_mask(v_ARGMAXS, v_linear_index);
+                                        _mm512_mask_packstorelo_ps((float *)(pooled_outputs_coefficients + cnt), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorehi_ps((float *)(pooled_outputs_coefficients + cnt + 16), m, v_D_POOLED_OUTPUTS); 
+                                        _mm512_mask_packstorelo_epi32((int *)(ks + cnt), m, v_k); 
+                                        _mm512_mask_packstorehi_epi32((int *)(ks + cnt + 16), m, v_k); 
+                                        cnt += _mm_countbits_32(m); 
+                                }
+                                #endif
+                                        for (int k2 = 0; k2 < cnt; k2++){
+                                                // if this (h_arg, w_arg) is the argmax of the window
+                                                int k = ks[k2];
+                                                float pooled_outputs_coefficient = pooled_outputs_coefficients[k2];
+                                            float * restrict local_scratch_pointer = local_scratch + ti(k,   0,   x_invalid_left,   0, Y_BLOCK_GRAD,   X_const,  C_BLOCK_GRAD); 
+                                            float * restrict local_scratch_pointer_next = local_scratch + ti(ks[k2+1],  0,  0,   0, Y_BLOCK_GRAD,   X_const,     C_BLOCK_GRAD);
+                                        float * restrict INPUTS_pointer = INPUTS_pointer_base;  
+                                        #if (C_BLOCK_GRAD == 16) && defined __MIC__
+                                        __m512 v_pooled_outputs_coefficient = _mm512_set1_ps(pooled_outputs_coefficient);
+                                        for(int x = 0; x < x_len_aligned; x+=2)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16 + 16), _MM_HINT_ET0);
+                                                __m512 v_input_0   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_input_1   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_0 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch_1 = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch_0 = _mm512_fmadd_ps(v_input_0, v_pooled_outputs_coefficient, v_scratch_0);
+                                            v_scratch_1 = _mm512_fmadd_ps(v_input_1, v_pooled_outputs_coefficient, v_scratch_1);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD ), v_scratch_0, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD + 16), v_scratch_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                        }
+                                        for(int x = x_len_aligned; x < x_len; x++)
+                                        {
+                                                _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
+                                                __m512 v_input   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                                __m512 v_scratch = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                                            v_scratch = _mm512_fmadd_ps(v_input, v_pooled_outputs_coefficient, v_scratch);
+                                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD), v_scratch, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                                        }
+                                        #else
+                                                    local_scratch_pointer[0 : x_len*C_BLOCK_GRAD] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD]; 
+                                        #endif
+                                        } // k
+                                    } // w_pooled
+                            } // h_pooled
                     }
-                    for(int x = x_len_aligned; x < x_len; x++)
-                    {
-                            _mm_prefetch((char *)(local_scratch_pointer_next + x*16), _MM_HINT_ET0);
-                                __m512 v_input   = _mm512_extload_ps(INPUTS_pointer + x*C_BLOCK_GRAD, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                                __m512 v_scratch = _mm512_extload_ps(local_scratch_pointer + x*C_BLOCK_GRAD, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                        v_scratch = _mm512_fmadd_ps(v_input, v_pooled_outputs_coefficient, v_scratch);
-                                _mm512_extstore_ps((float *)(local_scratch_pointer + x*C_BLOCK_GRAD), v_scratch, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
-                    }
-                    #else
-                                            local_scratch_pointer[0 : x_len*C_BLOCK_GRAD] += pooled_outputs_coefficient * INPUTS_pointer[0 : x_len*C_BLOCK_GRAD]; 
-                    #endif
-                                } // k
-                            } // w_pooled
-                        } // h_pooled
-            }
                       
                     } // w_arg
                 } // h_arg
             } // nn
-        omp_set_lock(&writelock[16*c_block*y_block]);
-        {
-        D_FILTERS[c_block * y_block * K_const*Y_BLOCK_GRAD*X_const*C_BLOCK_GRAD : K_const*Y_BLOCK_GRAD*X_const*C_BLOCK_GRAD] += local_scratch[ 0 : K_const*Y_BLOCK_GRAD*X_const*C_BLOCK_GRAD];
-        }
-        omp_unset_lock(&writelock[16*c_block*y_block]);
+
+            omp_set_lock(&writelock[16*c_block*y_block]);
+            {
+            D_FILTERS[(c_block * Y_blocks + y_block) * K_const*Y_BLOCK_GRAD*X_const*C_BLOCK_GRAD : K_const*Y_BLOCK_GRAD*X_const*C_BLOCK_GRAD] += local_scratch[ 0 : K_const*Y_BLOCK_GRAD*X_const*C_BLOCK_GRAD];
+            }
+            omp_unset_lock(&writelock[16*c_block*y_block]);
+
         } // outer
-    double end = omp_get_wtime();
-    printf("Time first loop = %.5lf\n", (end - st));
+        // double end = omp_get_wtime();
+        // printf("Time first loop = %.5lf\n", (end - st));
 
 #if 0
         for (int outer = 0; outer < N_blocks * H_blocks * W_blocks ; outer++){
@@ -1113,149 +3473,6 @@ void convolution_gradient_layer2(int N, int C, int H, int W, float *INPUTS, int 
         }
     }
 #endif
-
-    } // pragma offload
-}
-
-
-// INPUTS data structure [N, C/C_BLOCK, H, W, C_BLOCK]
-// D_FILTERS/FILTERS data structure [K, Y, X, C]
-// ARGMAXS/OUTPUTS/D_POOLED_OUTPUTS data structure [N, pooled_H, pooled_W, K]
-void convolution_gradient_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_POOLED_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH){
-    assert(C == C_const);
-    assert(H == H_const);
-    assert(W == W_const);
-    assert(K == K_const);
-    assert(padding == padding_const);
-    assert(X == X_const);
-    assert(Y == Y_const);
-    assert(output_H_const == (H_const + 2*padding_const - Y_const + 1)/stride_const);
-    assert(output_W_const == (W_const + 2*padding_const - X_const + 1)/stride_const);
-    assert(pooled_H_const == ceil((output_H_const - pooling_radius_const + 1.f)/pooling_stride_const));
-    assert(pooled_W_const == ceil((output_W_const - pooling_radius_const + 1.f)/pooling_stride_const));
-
-
-    #pragma offload target(mic:MIC_DEV) \ 
-    in(INPUTS:length(0) REUSE) \ 
-    in(FILTERS:length(0) REUSE) \ 
-    in(ARGMAXS:length(0) REUSE) \
-    in(D_POOLED_OUTPUTS:length(0) REUSE) \
-    in(D_FILTERS:length(0) REUSE) \
-    in(SCRATCH:length(0) REUSE)
-    {
-
-        int C_blocks = C_const/C_BLOCK_GRAD;
-        int Y_blocks = Y_const/Y_BLOCK_GRAD;
-        int N_blocks = N/N_BLOCK_GRAD;
-        int H_blocks = output_H_const/H_ARG_BLOCK_GRAD;
-        int W_blocks = output_W_const/W_ARG_BLOCK_GRAD;
-
-        SCRATCH[0 : omp_get_max_threads()*C_blocks*Y_blocks*K_const*Y_BLOCK_GRAD*X_const*C_BLOCK_GRAD] = 0.f;
-
-        #pragma omp parallel for \
-        default(none) \
-        schedule(dynamic) \
-        shared(N, INPUTS, ARGMAXS, FILTERS, D_POOLED_OUTPUTS, D_FILTERS, SCRATCH, C_blocks, Y_blocks, N_blocks, H_blocks, W_blocks)
-
-        for (int outer = 0; outer < N_blocks * H_blocks * W_blocks * C_blocks * Y_blocks; outer++){
-            int n_block = outer / (H_blocks * W_blocks * C_blocks * Y_blocks);
-            int n = n_block*N_BLOCK_GRAD;
-
-            int h_block = md(outer, H_blocks * W_blocks * C_blocks * Y_blocks) / (W_blocks * C_blocks * Y_blocks);
-            int h = h_block * H_ARG_BLOCK_GRAD;
-
-            int w_block = md(outer, W_blocks * C_blocks * Y_blocks) / (C_blocks * Y_blocks);
-            int w = w_block * W_ARG_BLOCK_GRAD;
-
-            int c_block = md(outer, C_blocks * Y_blocks) / (Y_blocks);
-            int c = c_block * C_BLOCK_GRAD;
-
-            int y_block = md(outer, Y_blocks);
-            int y = y_block * Y_BLOCK_GRAD;
-
-            assert(outer == ti5(n_block, h_block, w_block, c_block, y_block, H_blocks, W_blocks, C_blocks, Y_blocks));
-
-            float *restrict local_scratch = SCRATCH + ti7(omp_get_thread_num(), c_block,  y_block,  0,      0,        0,       0, 
-                                                                                C_blocks, Y_blocks, K_const, Y_BLOCK_GRAD, X_const, C_BLOCK_GRAD);
-
-            // for each element in the pre-pooled outputs, find out whether it is an argmax 
-            for (int n_tot = n; n_tot < n + N_BLOCK_GRAD; n_tot++){
-                for (int h_arg = h; h_arg < mn(h + H_ARG_BLOCK_GRAD, output_H_const); h_arg++){
-                    for (int w_arg = w; w_arg < mn(w + W_ARG_BLOCK_GRAD, output_W_const); w_arg++){
-
-                        int linear_index = h_arg*output_W_const + w_arg;
-
-                        int h_start = mx((h_arg + pooling_stride_const - pooling_radius_const)/pooling_stride_const, 0); // ceil((h_arg - pooling_radius + 1)/pooling_stride)
-                        int w_start = mx((w_arg + pooling_stride_const - pooling_radius_const)/pooling_stride_const, 0);
-
-                        int h_end = mn(h_arg/pooling_stride_const, pooled_H_const - 1); // floor(h_arg/pooling_stride_const)
-                        int w_end = mn(w_arg/pooling_stride_const, pooled_W_const - 1);
-                    
-                        // scan over all windows in which this element appears
-                        for (int h_pooled = h_start; h_pooled <= h_end; h_pooled++){
-                            for (int w_pooled = w_start; w_pooled <= w_end; w_pooled++){
-                        // for (int h_pooled = 0; h_pooled < pooled_H_const; h_pooled++){
-                            // for (int w_pooled = 0; w_pooled < pooled_W_const; w_pooled++){
-                                for (int k = 0; k < K_const; k++){
-
-                                    int pooled_index = ti(n_tot, h_pooled, w_pooled, k, pooled_H_const, pooled_W_const, K_const);
-
-                                    // if this (h_arg, w_arg) is the argmax of the window
-                                    if (ARGMAXS[pooled_index] == linear_index){
-                                        float pooled_outputs_coefficient = D_POOLED_OUTPUTS[pooled_index];
-
-                                        // figure out the width of the window that is valid (i.e, not out-of-bounds for INPUTS)
-                                        int x_invalid_left = mx(padding_const - w_arg, 0);
-                                        int x_invalid_right = mx(w_arg - padding_const + X_const - W_const, 0);
-                                        int x_len = mx(X_const - x_invalid_left - x_invalid_right, 0);
-                                        
-                                        int w_inputs = mx(mn(w_arg - padding_const, W_const - 1), 0);
-                                        
-                                        for (int yy = 0; yy < Y_BLOCK_GRAD; yy++){
-                                            if ((y + yy + h_arg - padding_const >= 0) && (y + yy + h_arg - padding_const < H_const)){
-                                                int h_inputs = h_arg + y + yy - padding_const;
-                                              
-                                                local_scratch[ti(k,   yy,        x_invalid_left,   0, 
-                                                                      Y_BLOCK_GRAD,   X_const,          C_BLOCK_GRAD) : x_len*C_BLOCK_GRAD] += 
-                                                    pooled_outputs_coefficient *
-                                                    INPUTS[ti5(n_tot,  c_block,    h_inputs,    w_inputs,   0, 
-                                                                       C_blocks,   H_const,     W_const,    C_BLOCK_GRAD) : x_len*C_BLOCK_GRAD];
-                                            } // if
-                                        } //yy
-                                    } // if
-
-                                } // k
-                            } // w_pooled
-                        } // h_pooled
-                      
-                    } // w_arg
-                } // h_arg
-            } // nn
-
-        } // outer
-
-
-        for (int thread = 0; thread < omp_get_max_threads(); thread++){
-
-            #pragma omp parallel for
-            for (int k = 0; k < K_const; k++){
-                for (int c_block = 0; c_block < C_blocks; c_block++){
-                    int c = c_block*C_BLOCK_GRAD;
-
-                    for (int y = 0; y < Y_const; y++){
-                        int y_block = y / Y_BLOCK_GRAD;
-                        int yy = md(y, Y_BLOCK_GRAD);
-
-                        for (int x = 0; x < X_const; x++){
-                            D_FILTERS[ti(k, y, x, c, Y_const, X_const, C_const) : C_BLOCK_GRAD] += 
-                             SCRATCH[ti7(thread,  c_block,  y_block,  k,       yy,      x,       0, 
-                                                  C_blocks, Y_blocks, K_const, Y_BLOCK_GRAD, X_const, C_BLOCK_GRAD) : C_BLOCK_GRAD];
-                        }
-
-                    }
-                }
-            }
-        }
 
     } // pragma offload
 }
@@ -1866,7 +4083,38 @@ void interleave_for_gradient(const int N, const int C, const int H, const int W,
         int c_block, cc, n, c, h, w;
         int C_BLOCKSIZE = C/BLOCKSIZE;
  
-        SCRATCH[0 : N*C*H*W] = TENSOR[0 : N*C*H*W];
+    int D = N*C*H*W;
+    int num_cache_lines_64 = D/64;  
+    int D_aligned = num_cache_lines_64*64;
+    int D_remaining = D - D_aligned;
+
+        #pragma omp parallel for schedule(static,16) default(none) shared(D, num_cache_lines_64, TENSOR, SCRATCH)
+    for(int d = 0; d < num_cache_lines_64; d++)
+    {
+            float *restrict tensor_pointer = (float *)(TENSOR) + d*64;
+            float *restrict scratch_pointer = SCRATCH + d*64;
+        #if defined __MIC__
+                __m512 tens_1 = _mm512_extload_ps(tensor_pointer , _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 tens_2 = _mm512_extload_ps(tensor_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 tens_3 = _mm512_extload_ps(tensor_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 tens_4 = _mm512_extload_ps(tensor_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+        _mm_prefetch((char *)(tensor_pointer + 64     ), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 64 + 16), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 64 + 32), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 64 + 48), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 256), _MM_HINT_T1);
+        _mm_prefetch((char *)(tensor_pointer + 256 + 16), _MM_HINT_T1);
+        _mm_prefetch((char *)(tensor_pointer + 256 + 32), _MM_HINT_T1);
+        _mm_prefetch((char *)(tensor_pointer + 256 + 48), _MM_HINT_T1);
+                _mm512_storenrngo_ps((float *)(scratch_pointer),      tens_1);
+                _mm512_storenrngo_ps((float *)(scratch_pointer + 16), tens_2);
+                _mm512_storenrngo_ps((float *)(scratch_pointer + 32), tens_3);
+                _mm512_storenrngo_ps((float *)(scratch_pointer + 48), tens_4);
+        #endif
+    }
+    //copy remaining unaligned elements
+    SCRATCH[D_aligned : D_remaining] = TENSOR[D_aligned : D_remaining];
+
 
         #pragma omp parallel for \
             schedule(dynamic) \
@@ -1899,8 +4147,38 @@ void uninterleave_for_gradient(const int N, const int C, const int H, const int 
     {
         int c_block, cc, n, c, h, w;
         int C_BLOCKSIZE = C/BLOCKSIZE;
-        
-        SCRATCH[0 : N*C*H*W] = TENSOR[0 : N*C*H*W];
+
+    int D = N*C*H*W;
+    int num_cache_lines_64 = D/64;  
+    int D_aligned = num_cache_lines_64*64;
+    int D_remaining = D - D_aligned;
+
+        #pragma omp parallel for schedule(static,16) default(none) shared(D, num_cache_lines_64, TENSOR, SCRATCH)
+    for(int d = 0; d < num_cache_lines_64; d++)
+    {
+            float *restrict tensor_pointer = (float *)(TENSOR) + d*64;
+            float *restrict scratch_pointer = SCRATCH + d*64;
+        #if defined __MIC__
+                __m512 tens_1 = _mm512_extload_ps(tensor_pointer , _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 tens_2 = _mm512_extload_ps(tensor_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 tens_3 = _mm512_extload_ps(tensor_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 tens_4 = _mm512_extload_ps(tensor_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+        _mm_prefetch((char *)(tensor_pointer + 64     ), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 64 + 16), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 64 + 32), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 64 + 48), _MM_HINT_T0);
+        _mm_prefetch((char *)(tensor_pointer + 256), _MM_HINT_T1);
+        _mm_prefetch((char *)(tensor_pointer + 256 + 16), _MM_HINT_T1);
+        _mm_prefetch((char *)(tensor_pointer + 256 + 32), _MM_HINT_T1);
+        _mm_prefetch((char *)(tensor_pointer + 256 + 48), _MM_HINT_T1);
+                _mm512_storenrngo_ps((float *)(scratch_pointer),      tens_1);
+                _mm512_storenrngo_ps((float *)(scratch_pointer + 16), tens_2);
+                _mm512_storenrngo_ps((float *)(scratch_pointer + 32), tens_3);
+                _mm512_storenrngo_ps((float *)(scratch_pointer + 48), tens_4);
+        #endif
+    }
+    //copy remaining unaligned elements
+    SCRATCH[D_aligned : D_remaining] = TENSOR[D_aligned : D_remaining];
 
         #pragma omp parallel for \
             schedule(dynamic) \
@@ -1924,6 +4202,74 @@ void uninterleave_for_gradient(const int N, const int C, const int H, const int 
         } // nc
     } // pragma offload
 }
+
+// void interleave_for_gradient(const int N, const int C, const int H, const int W, const int BLOCKSIZE, float *restrict TENSOR, float *restrict SCRATCH){
+
+//     #pragma offload target(mic:MIC_DEV) \ 
+//         in(TENSOR:length(0) REUSE) \
+//         in(SCRATCH:length(0) REUSE)
+//     {
+//         int c_block, cc, n, c, h, w;
+//         int C_BLOCKSIZE = C/BLOCKSIZE;
+ 
+//         SCRATCH[0 : N*C*H*W] = TENSOR[0 : N*C*H*W];
+
+//         #pragma omp parallel for \
+//             schedule(dynamic) \
+//             default(none) \
+//             private(c_block, n, c, cc, h, w) \
+//             shared(N, H, W, C, C_BLOCKSIZE, TENSOR, SCRATCH, BLOCKSIZE)
+
+//         for (int nc = 0; nc < N*C; nc++){
+//             n = nc / C;
+//             c = md(nc, C);
+//             c_block = c/BLOCKSIZE;
+//             cc = md(c, BLOCKSIZE);
+
+            
+//             for (h = 0; h < H; h++){
+//                 for (w = 0; w < W; w++){
+//                     TENSOR[ti5(n, c_block, h, w, cc, C_BLOCKSIZE, H, W, BLOCKSIZE)] = SCRATCH[ti(n, c, h, w, C, H, W)];
+//                 }
+//             }
+
+//         } // nc
+//     } // pragma offload
+// }
+
+// void uninterleave_for_gradient(const int N, const int C, const int H, const int W, const int BLOCKSIZE, float *restrict TENSOR, float *restrict SCRATCH){
+
+//     #pragma offload target(mic:MIC_DEV) \ 
+//         in(TENSOR:length(0) REUSE) \
+//         in(SCRATCH:length(0) REUSE)
+//     {
+//         int c_block, cc, n, c, h, w;
+//         int C_BLOCKSIZE = C/BLOCKSIZE;
+        
+//         SCRATCH[0 : N*C*H*W] = TENSOR[0 : N*C*H*W];
+
+//         #pragma omp parallel for \
+//             schedule(dynamic) \
+//             default(none) \
+//             private(c_block, n, c, cc, h, w) \
+//             shared(N, H, W, C, C_BLOCKSIZE, TENSOR, SCRATCH, BLOCKSIZE)
+
+//         for (int nc = 0; nc < N*C; nc++){
+//             n = nc / C;
+//             c = md(nc, C);
+//             c_block = c/BLOCKSIZE;
+//             cc = md(c, BLOCKSIZE);
+
+            
+//             for (h = 0; h < H; h++){
+//                 for (w = 0; w < W; w++){
+//                     TENSOR[ti(n, c, h, w, C, H, W)] = SCRATCH[ti5(n, c_block, h, w, cc, C_BLOCKSIZE, H, W, BLOCKSIZE)];
+//                 }
+//             }
+
+//         } // nc
+//     } // pragma offload
+// }
 
 void interleave_block(const int N, const int C, const int BLOCKSIZE, float *restrict TENSOR, float *restrict SCRATCH){
 

@@ -49,7 +49,7 @@ def main():
             X = 5
             Y = 5
             stride = 1
-            padding = 0
+            padding = 2
             pooling_radius = 3
             pooling_stride = 2
 
@@ -236,6 +236,12 @@ def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooli
             '#define output_W_const2 1'  + '\n' \
             '#define pooled_H_const2 1' + '\n' \
             '#define pooled_W_const2 1' + '\n'
+
+    contents += '#define N_BLOCK_GRAD2 1' + '\n' + \
+            '#define C_BLOCK_GRAD2 1' + '\n' + \
+            '#define H_ARG_BLOCK_GRAD2 1' + '\n' + \
+            '#define W_ARG_BLOCK_GRAD2 1' + '\n' + \
+            '#define Y_BLOCK_GRAD2 1' + '\n\n'
 
     contents += '\n\n' + '#define C_constL2 ' + `c` + '\n' + \
             '#define H_constL2 ' + `H` + '\n' + \
@@ -462,7 +468,7 @@ def test_convolution(time_and_dont_test, time_and_dont_test_grad, test_gradient,
 
         timer.tic()
         gradient_filters.convolution_gradient(inputs, filters, argmaxs,
-            gradient_pooled_outputs, gradient_inputs, stride, padding, pooling_radius, pooling_stride, 2, scratch)
+            gradient_pooled_outputs, gradient_inputs, stride, padding, pooling_radius, pooling_stride, 1, scratch)
         convolution_gradient_time = timer.toc()
 
         print '\n \n Time: %f seconds.' % convolution_gradient_time
