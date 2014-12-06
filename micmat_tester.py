@@ -112,14 +112,14 @@ def main():
 
     C.check_mic_status()
 
-    test_fft(scratch)
+    # test_fft(scratch)
 
     # C.initialize_locks()
-    # if examine_convolution:
-    #     test_convolution(time_and_dont_test, time_and_dont_test_grad, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block, N_block_grad, C_block_grad, H_arg_block_grad, W_arg_block_grad, Y_block_grad)
+    if examine_convolution:
+        test_convolution(time_and_dont_test, time_and_dont_test_grad, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block, N_block_grad, C_block_grad, H_arg_block_grad, W_arg_block_grad, Y_block_grad)
 
-    # if examine_local:
-    #     test_local(time_and_dont_test, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block)
+    if examine_local:
+        test_local(time_and_dont_test, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block)
 
 
     # inputs = C.MICMat((N, K, H, W)).offload_mic().fill_zeros()
@@ -329,6 +329,90 @@ def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooli
             '#define H_ARG_BLOCK_GRAD6 1' + '\n' + \
             '#define W_ARG_BLOCK_GRAD6 1' + '\n' + \
             '#define Y_BLOCK_GRAD6 1' + '\n\n'
+
+    contents += '\n\n' + '#define C_const7 1\n' + \
+            '#define H_const7 1' + '\n' + \
+            '#define W_const7 1' + '\n' + \
+            '#define K_const7 1' + '\n' + \
+            '#define stride_const7 1' + '\n' + \
+            '#define padding_const7 1' + '\n' + \
+            '#define pooling_radius_const7 1' + '\n' + \
+            '#define pooling_stride_const7 1' + '\n' + \
+            '#define Y_const7 1' + '\n' + \
+            '#define X_const7 1' + '\n' \
+            '#define output_H_const7 1'  + '\n' \
+            '#define output_W_const7 1'  + '\n' \
+            '#define pooled_H_const7 1' + '\n' \
+            '#define pooled_W_const7 1' + '\n'
+
+    contents += '#define N_BLOCK_GRAD7 1' + '\n' + \
+            '#define C_BLOCK_GRAD7 1' + '\n' + \
+            '#define H_ARG_BLOCK_GRAD7 1' + '\n' + \
+            '#define W_ARG_BLOCK_GRAD7 1' + '\n' + \
+            '#define Y_BLOCK_GRAD7 1' + '\n\n'
+
+    contents += '\n\n' + '#define C_const8 1\n' + \
+            '#define H_const8 1' + '\n' + \
+            '#define W_const8 1' + '\n' + \
+            '#define K_const8 1' + '\n' + \
+            '#define stride_const8 1' + '\n' + \
+            '#define padding_const8 1' + '\n' + \
+            '#define pooling_radius_const8 1' + '\n' + \
+            '#define pooling_stride_const8 1' + '\n' + \
+            '#define Y_const8 1' + '\n' + \
+            '#define X_const8 1' + '\n' \
+            '#define output_H_const8 1'  + '\n' \
+            '#define output_W_const8 1'  + '\n' \
+            '#define pooled_H_const8 1' + '\n' \
+            '#define pooled_W_const8 1' + '\n'
+
+    contents += '#define N_BLOCK_GRAD8 1' + '\n' + \
+            '#define C_BLOCK_GRAD8 1' + '\n' + \
+            '#define H_ARG_BLOCK_GRAD8 1' + '\n' + \
+            '#define W_ARG_BLOCK_GRAD8 1' + '\n' + \
+            '#define Y_BLOCK_GRAD8 1' + '\n\n'
+
+    contents += '\n\n' + '#define C_const9 1\n' + \
+            '#define H_const9 1' + '\n' + \
+            '#define W_const9 1' + '\n' + \
+            '#define K_const9 1' + '\n' + \
+            '#define stride_const9 1' + '\n' + \
+            '#define padding_const9 1' + '\n' + \
+            '#define pooling_radius_const9 1' + '\n' + \
+            '#define pooling_stride_const9 1' + '\n' + \
+            '#define Y_const9 1' + '\n' + \
+            '#define X_const9 1' + '\n' \
+            '#define output_H_const9 1'  + '\n' \
+            '#define output_W_const9 1'  + '\n' \
+            '#define pooled_H_const9 1' + '\n' \
+            '#define pooled_W_const9 1' + '\n'
+
+    contents += '#define N_BLOCK_GRAD9 1' + '\n' + \
+            '#define C_BLOCK_GRAD9 1' + '\n' + \
+            '#define H_ARG_BLOCK_GRAD9 1' + '\n' + \
+            '#define W_ARG_BLOCK_GRAD9 1' + '\n' + \
+            '#define Y_BLOCK_GRAD9 1' + '\n\n'
+
+    contents += '\n\n' + '#define C_const10 1\n' + \
+            '#define H_const10 1' + '\n' + \
+            '#define W_const10 1' + '\n' + \
+            '#define K_const10 1' + '\n' + \
+            '#define stride_const10 1' + '\n' + \
+            '#define padding_const10 1' + '\n' + \
+            '#define pooling_radius_const10 1' + '\n' + \
+            '#define pooling_stride_const10 1' + '\n' + \
+            '#define Y_const10 1' + '\n' + \
+            '#define X_const10 1' + '\n' \
+            '#define output_H_const10 1'  + '\n' \
+            '#define output_W_const10 1'  + '\n' \
+            '#define pooled_H_const10 1' + '\n' \
+            '#define pooled_W_const10 1' + '\n'
+
+    contents += '#define N_BLOCK_GRAD10 1' + '\n' + \
+            '#define C_BLOCK_GRAD10 1' + '\n' + \
+            '#define H_ARG_BLOCK_GRAD10 1' + '\n' + \
+            '#define W_ARG_BLOCK_GRAD10 1' + '\n' + \
+            '#define Y_BLOCK_GRAD10 1' + '\n\n'
 
     contents += '\n\n' + '#define C_constL2 ' + `c` + '\n' + \
             '#define H_constL2 ' + `H` + '\n' + \
