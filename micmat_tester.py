@@ -112,12 +112,15 @@ def main():
 
     C.check_mic_status()
 
-    # C.initialize_locks()
-    if examine_convolution:
-        test_convolution(time_and_dont_test, time_and_dont_test_grad, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block, N_block_grad, C_block_grad, H_arg_block_grad, W_arg_block_grad, Y_block_grad)
+    test_fft(scratch)
 
-    if examine_local:
-        test_local(time_and_dont_test, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block)
+    # C.initialize_locks()
+    # if examine_convolution:
+    #     test_convolution(time_and_dont_test, time_and_dont_test_grad, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block, N_block_grad, C_block_grad, H_arg_block_grad, W_arg_block_grad, Y_block_grad)
+
+    # if examine_local:
+    #     test_local(time_and_dont_test, test_gradient, offload, N, K_preshadow, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block)
+
 
     # inputs = C.MICMat((N, K, H, W)).offload_mic().fill_zeros()
     # outputs = inputs.deepcopy()
@@ -243,6 +246,90 @@ def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooli
             '#define W_ARG_BLOCK_GRAD2 1' + '\n' + \
             '#define Y_BLOCK_GRAD2 1' + '\n\n'
 
+    contents += '\n\n' + '#define C_const3 1\n' + \
+            '#define H_const3 1' + '\n' + \
+            '#define W_const3 1' + '\n' + \
+            '#define K_const3 1' + '\n' + \
+            '#define stride_const3 1' + '\n' + \
+            '#define padding_const3 1' + '\n' + \
+            '#define pooling_radius_const3 1' + '\n' + \
+            '#define pooling_stride_const3 1' + '\n' + \
+            '#define Y_const3 1' + '\n' + \
+            '#define X_const3 1' + '\n' \
+            '#define output_H_const3 1'  + '\n' \
+            '#define output_W_const3 1'  + '\n' \
+            '#define pooled_H_const3 1' + '\n' \
+            '#define pooled_W_const3 1' + '\n'
+
+    contents += '#define N_BLOCK_GRAD3 1' + '\n' + \
+            '#define C_BLOCK_GRAD3 1' + '\n' + \
+            '#define H_ARG_BLOCK_GRAD3 1' + '\n' + \
+            '#define W_ARG_BLOCK_GRAD3 1' + '\n' + \
+            '#define Y_BLOCK_GRAD3 1' + '\n\n'
+
+    contents += '\n\n' + '#define C_const4 1\n' + \
+            '#define H_const4 1' + '\n' + \
+            '#define W_const4 1' + '\n' + \
+            '#define K_const4 1' + '\n' + \
+            '#define stride_const4 1' + '\n' + \
+            '#define padding_const4 1' + '\n' + \
+            '#define pooling_radius_const4 1' + '\n' + \
+            '#define pooling_stride_const4 1' + '\n' + \
+            '#define Y_const4 1' + '\n' + \
+            '#define X_const4 1' + '\n' \
+            '#define output_H_const4 1'  + '\n' \
+            '#define output_W_const4 1'  + '\n' \
+            '#define pooled_H_const4 1' + '\n' \
+            '#define pooled_W_const4 1' + '\n'
+
+    contents += '#define N_BLOCK_GRAD4 1' + '\n' + \
+            '#define C_BLOCK_GRAD4 1' + '\n' + \
+            '#define H_ARG_BLOCK_GRAD4 1' + '\n' + \
+            '#define W_ARG_BLOCK_GRAD4 1' + '\n' + \
+            '#define Y_BLOCK_GRAD4 1' + '\n\n'
+
+    contents += '\n\n' + '#define C_const5 1\n' + \
+            '#define H_const5 1' + '\n' + \
+            '#define W_const5 1' + '\n' + \
+            '#define K_const5 1' + '\n' + \
+            '#define stride_const5 1' + '\n' + \
+            '#define padding_const5 1' + '\n' + \
+            '#define pooling_radius_const5 1' + '\n' + \
+            '#define pooling_stride_const5 1' + '\n' + \
+            '#define Y_const5 1' + '\n' + \
+            '#define X_const5 1' + '\n' \
+            '#define output_H_const5 1'  + '\n' \
+            '#define output_W_const5 1'  + '\n' \
+            '#define pooled_H_const5 1' + '\n' \
+            '#define pooled_W_const5 1' + '\n'
+
+    contents += '#define N_BLOCK_GRAD5 1' + '\n' + \
+            '#define C_BLOCK_GRAD5 1' + '\n' + \
+            '#define H_ARG_BLOCK_GRAD5 1' + '\n' + \
+            '#define W_ARG_BLOCK_GRAD5 1' + '\n' + \
+            '#define Y_BLOCK_GRAD5 1' + '\n\n'
+
+    contents += '\n\n' + '#define C_const6 1\n' + \
+            '#define H_const6 1' + '\n' + \
+            '#define W_const6 1' + '\n' + \
+            '#define K_const6 1' + '\n' + \
+            '#define stride_const6 1' + '\n' + \
+            '#define padding_const6 1' + '\n' + \
+            '#define pooling_radius_const6 1' + '\n' + \
+            '#define pooling_stride_const6 1' + '\n' + \
+            '#define Y_const6 1' + '\n' + \
+            '#define X_const6 1' + '\n' \
+            '#define output_H_const6 1'  + '\n' \
+            '#define output_W_const6 1'  + '\n' \
+            '#define pooled_H_const6 1' + '\n' \
+            '#define pooled_W_const6 1' + '\n'
+
+    contents += '#define N_BLOCK_GRAD6 1' + '\n' + \
+            '#define C_BLOCK_GRAD6 1' + '\n' + \
+            '#define H_ARG_BLOCK_GRAD6 1' + '\n' + \
+            '#define W_ARG_BLOCK_GRAD6 1' + '\n' + \
+            '#define Y_BLOCK_GRAD6 1' + '\n\n'
+
     contents += '\n\n' + '#define C_constL2 ' + `c` + '\n' + \
             '#define H_constL2 ' + `H` + '\n' + \
             '#define W_constL2 ' + `W` + '\n' + \
@@ -265,6 +352,164 @@ def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooli
     path.append(SPECIFIC_MICMAT_PATH)
     subprocess.call(MICMAT_PATH + 'micmat_build_specific.sh', cwd = MICMAT_PATH, env = os.environ)
 
+
+def test_fft(scratch):
+    H, W = 6, 6
+    # outputs = C.MICMat((1, 1, H, W)).offload_mic().fill_zeros()
+    # inputs = C.MICMat((1, 1, H, 2*(W/2 + 1))).offload_mic().fill_randn(stream, 0., 1.)
+    # inputs.wipe_out_irrelevant_entries()
+
+    # real, imaginary = inputs.real_and_imaginary()
+    # print real
+    # print imaginary
+
+    # inputs.ifft(outputs)
+
+    # inputs_copy = outputs.fft(inputs.deepcopy()).wipe_out_irrelevant_entries()
+
+    # print (inputs - inputs_copy).abs().mean()
+    # real, imaginary = inputs_copy.real_and_imaginary()
+    # print real
+    # print imaginary
+
+
+    # outputs = C.MICMat((1, 1, H, 2*W)).offload_mic().fill_zeros()
+    # inputs = C.MICMat((1, 1, H, 2*W)).offload_mic().fill_randn(stream, 0., 1.)
+    # inputs.update(inputs.deepcopy().conjugate())
+
+    # inputs.fft_full(outputs)
+    # outputs_ifft = inputs.ifft_full(outputs.deepcopy())
+    # inputs_copy = outputs.ifft_full(inputs.deepcopy().fill_zeros())
+
+    # real, imaginary = outputs.real_and_imaginary()
+    # print real
+    # print imaginary
+    # real, imaginary = outputs_ifft.real_and_imaginary()
+    # print real
+    # print imaginary
+
+    # print (outputs - outputs_ifft.conjugate()).abs().sum()
+
+  
+
+    outputs = C.MICMat((1, 1, H, W)).offload_mic().fill_zeros()
+    outputs_full = C.MICMat((1, 1, H, 2*W)).offload_mic().fill_zeros()
+    consts_outputs = C.MICMat((1, 1, H, W)).offload_mic().fill_randn(stream, 0., 1.)
+    consts_outputs_full = C.MICMat((1, 1, H, 2*W)).offload_mic().fill_randn(stream, 0., 1.)
+    consts_outputs_full.update(consts_outputs_full.deepcopy().conjugate()).scale(0.5)
+    inputs = C.MICMat((1, 1, H, 2*(W/2 + 1))).offload_mic().fill_randn(stream, 0., 1.) #.wipe_out_irrelevant_entries()
+    inputs_full = C.MICMat((1, 1, H, 2*W)).offload_mic().fill_randn(stream, 0., 1.)
+    
+    forward_pass = lambda inp: inp.ifft(outputs.deepcopy()).multiply(consts_outputs).sum()
+    R = forward_pass(inputs)
+
+    grad_R = consts_outputs.deepcopy()
+    # grad_inputs = grad_R.ifft_full(inputs_full.deepcopy().fill_zeros())
+    grad_inputs = grad_R.fft(inputs.deepcopy().fill_zeros())
+    # grad_inputs.conjugate()
+    grad_inputs.wipe_out_irrelevant_entries()
+    
+    real, imaginary = grad_inputs.real_and_imaginary()
+    print real
+    print imaginary
+    
+    # grad_inputs.conjugate()
+    # grad_inputs.wipe_out_irrelevant_entries()
+    grad_inputs.fft_conjugate_symmetry_scaling(W, scratch)
+
+    real, imaginary = grad_inputs.real_and_imaginary()
+    print real
+    print imaginary
+
+    
+    print grad_inputs.deepcopy().pow(2.).sum()
+
+    epsilon = 0.0001
+    inputs_plus_d = inputs.deepcopy().update(grad_inputs, epsilon)
+    inputs_minus_d = inputs.deepcopy().update(grad_inputs, -epsilon)
+    R_plus = forward_pass(inputs_plus_d)
+    R_minus = forward_pass(inputs_minus_d)
+
+    R_diff = (R_plus - R_minus) / (2.*epsilon)
+    print R_diff
+
+    
+
+    
+
+    
+    # ifft_d = d_inputs.ifft(outputs.deepcopy())
+    # computed_gradient = ifft_d
+    # # computed_gradient.scale(2.)
+
+    # print computed_gradient.divide(fd_gradient)
+
+    # outputs = C.MICMat((1, 1, 4, 4)).offload_mic().fill_zeros()
+    # inputs = C.MICMat((1, 1, 4, 2*3)).offload_mic().fill_randn(stream, 0., 1.).wipe_out_irrelevant_entries()
+    # d_inputs = C.MICMat((1, 1, 4, 2*3)).offload_mic().fill_randn(stream, 0., 0.00001).wipe_out_irrelevant_entries()
+    # inputs_plus_d = inputs.deepcopy().update(d_inputs)
+    # inputs_minus_d = inputs.deepcopy().update(d_inputs, -1.)
+
+    # outputs_plus_d = inputs_plus_d.ifft(outputs.deepcopy())
+    # outputs_minus_d = inputs_minus_d.ifft(outputs.deepcopy())
+    # fd_gradient = (outputs_plus_d - outputs_minus_d).scale(0.5)
+    
+    # ifft_d = d_inputs.ifft(outputs.deepcopy())
+    # computed_gradient = ifft_d
+    # # computed_gradient.scale(2.)
+
+    # print computed_gradient.divide(fd_gradient)
+
+
+    # inputs.wipe_out_irrelevant_entries()
+    # # inputs = outputs.fft()
+    # timer.elapsed()
+    # # outputs.fill_zeros()
+    # extra.fill_randn(stream, 0., 1.)
+    # timer.tic()
+    # inputs.ifft(outputs)
+    
+    # outputs.fft(inputs)
+    # inputs.ifft(outputs)
+    # outputs.fft(inputs)
+    # inputs.ifft(outputs)
+    # timer.elapsed()
+
+
+    # spatials = C.MICMat((128, 64, 32, 32)).offload_mic().fill_randn(stream, 0., 1.)
+    # frequencies = C.MICMat((128, 64, 32, 2*17)).offload_mic().fill_randn(stream, 0., 1.)
+    # spatials = C.MICMat((1, 1, 6, 6)).offload_mic().fill_randn(stream, 0., 1.)
+    # frequencies = C.MICMat((1, 1, 6, 2*4)).offload_mic().fill_randn(stream, 0., 1.)
+    # extra = C.MICMat((10, 3, 32, 17)).offload_mic()
+
+    # spatials_original = spatials.deepcopy()
+
+    # timer.tic()
+    # spatials.fft(frequencies)
+    # frequencies.wipe_out_irrelevant_entries()
+    # # frequencies = spatials.fft()
+    # timer.elapsed()
+    # # spatials.fill_zeros()
+    # extra.fill_randn(stream, 0., 1.)
+    # timer.tic()
+    # frequencies.ifft(spatials)
+    
+    # spatials.fft(frequencies)
+    # frequencies.ifft(spatials)
+    # spatials.fft(frequencies)
+    # frequencies.ifft(spatials)
+    # timer.elapsed()
+
+    # print (spatials - spatials_original).abs().mean()
+
+    # real, imaginary = frequencies.real_and_imaginary()
+    # print real
+    # print imaginary
+
+    # frequencies.conjugate()
+    # real, imaginary = frequencies.real_and_imaginary()
+    # print real
+    # print imaginary
 
 def test_convolution(time_and_dont_test, time_and_dont_test_grad, test_gradient, offload, N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block, N_block_grad, C_block_grad, H_arg_block_grad, W_arg_block_grad, Y_block_grad):
     output_H = (H + 2*padding - Y + 1)/stride

@@ -82,6 +82,7 @@ cdef class MICMat:
 
 
 ######### allocation and deallocation functions
+    @profile_routine
     def allocate_host(self, *args):
         if not args:
             assert self.size > 0, 'MICMat shape not set. Cannot allocate.'
@@ -203,6 +204,7 @@ cdef class MICMat:
     #    cmicmat.pull_mic(self.size, self.A)
     #    return self
 
+    @profile_routine
     def pull_mic(self):
         cmicmat.pull_mic(self.size, self.A)
         return self
@@ -272,6 +274,7 @@ cdef class MICMat:
         else:
             raise NameError('Cannot set attribute \'' + name + '\'.')
 
+    @profile_routine
     def astype(self, dtype):
         # we assume that there are only 2 data types... float and int
 
@@ -573,9 +576,11 @@ cdef class MICMat:
 
 
 ######### string and array outputting
+    @profile_routine
     def print_host(self):
         cmicmat.print_slice(self.shape[-2], self.shape[-1], self.A, 0)
 
+    @profile_routine
     def print_mic(self):
         cmicmat.print_slice(self.shape[-2], self.shape[-1], self.A, 1)
 
@@ -872,6 +877,18 @@ cdef class MICMat:
         elif layer == 6:
             cmicmat.convolution_layer6(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
 
+        elif layer == 7:
+            cmicmat.convolution_layer7(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
+
+        elif layer == 8:
+            cmicmat.convolution_layer8(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
+
+        elif layer == 9:
+            cmicmat.convolution_layer9(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
+
+        elif layer == 10:
+            cmicmat.convolution_layer10(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, argmaxs.A_int, stride, padding, pooling_radius, pooling_stride, self.offloaded, scratch.A)
+
     @profile_routine
     def convolution_gradient(self, MICMat inputs, MICMat filters, MICMat argmaxs,
         MICMat gradient_pooled_outputs, MICMat gradient_inputs, 
@@ -926,8 +943,24 @@ cdef class MICMat:
         elif layer == 6:
             cmicmat.convolution_gradient_layer6(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
                 gradient_inputs.A, self.A, scratch.A)
-            
 
+        elif layer == 7:
+            cmicmat.convolution_gradient_layer7(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+                gradient_inputs.A, self.A, scratch.A)
+
+        elif layer == 8:
+            cmicmat.convolution_gradient_layer8(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+                gradient_inputs.A, self.A, scratch.A)
+
+        elif layer == 9:
+            cmicmat.convolution_gradient_layer9(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+                gradient_inputs.A, self.A, scratch.A)
+
+        elif layer == 10:
+            cmicmat.convolution_gradient_layer10(N, C, H, W, inputs.A, K, Y, X, padding, filters.A, argmaxs.A_int, gradient_pooled_outputs.A, 
+                gradient_inputs.A, self.A, scratch.A)
+            
+    @profile_routine
     def convolve_and_pool_replace(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch):
         # asserts that check number of dimensions, sizes, etc
 
@@ -1016,6 +1049,129 @@ cdef class MICMat:
         elif layer == 2:
             cmicmat.local_layer2(N, C, H, W, inputs.A, K, Y, X, filters.A, self.A, stride, padding, self.offloaded, scratch.A)
 
+    @profile_routine
+    def fft(self, *args):
+        is_forward = True
+        frequencies_shape = self.shape[:-2] + (self.shape[-2], 2*(self.shape[-1]/2 + 1))
+
+        cdef MICMat frequencies
+        if not args:
+            frequencies = MICMat(frequencies_shape).offload_mic()
+
+        else:
+            frequencies = args[0]
+
+        assert frequencies.shape == frequencies_shape, 'Expected frequency shape is ' + `frequencies_shape` + '.'
+        cmicmat.fft(np.product(self.shape[:-2]), self.shape[-2], self.shape[-1], is_forward, self.A, frequencies.A)
+
+        return frequencies
+
+    @profile_routine
+    def ifft(self, MICMat spatials):
+        is_forward = False
+
+        assert self.shape == spatials.shape[:-2] + (spatials.shape[-2], 2*(spatials.shape[-1]/2 + 1)), 'Expected frequency shape is ' + `spatials.shape[:-2] + (spatials.shape[-2], 2*(spatials.shape[-1]/2 + 1))` + '.'
+        cmicmat.fft(np.product(spatials.shape[:-2]), spatials.shape[-2], spatials.shape[-1], is_forward, spatials.A, self.A)
+
+        return spatials
+
+    @profile_routine
+    def fft_full(self, *args):
+        is_forward = True
+        frequencies_shape = self.shape
+
+        cdef MICMat frequencies
+        if not args:
+            frequencies = MICMat(frequencies_shape).offload_mic()
+
+        else:
+            frequencies = args[0]
+
+        assert frequencies.shape == frequencies_shape, 'Expected frequency shape is ' + `frequencies_shape` + ' (with complex double-counting).'
+        cmicmat.fft_full(np.product(self.shape[:-2]), self.shape[-2], self.shape[-1]/2, is_forward, self.A, frequencies.A)
+
+        return frequencies
+
+    @profile_routine
+    def ifft_full(self, MICMat spatials):
+        is_forward = False
+
+        assert self.shape == spatials.shape, 'Expected frequency shape is ' + `spatials.shape` + ' (with complex double-counting).'
+        cmicmat.fft_full(np.product(spatials.shape[:-2]), spatials.shape[-2], spatials.shape[-1]/2, is_forward, spatials.A, self.A)
+
+        return spatials
+
+    @profile_routine
+    def wipe_out_irrelevant_entries(self):
+        cmicmat.wipe_out_irrelevant_entries(np.product(self.shape[:-2]), self.shape[-2], self.shape[-1]/2, self.A)
+
+        return self
+
+    @profile_routine
+    def wipe_out_irrelevant_entries_full(self):
+        cmicmat.wipe_out_irrelevant_entries_full(np.product(self.shape[:-2]), self.shape[-2], self.shape[-1]/2, self.A)
+
+        return self
+
+    @profile_routine
+    def fft_conjugate_symmetry_scaling(self, spatial_W, MICMat scratch):
+        N, K, H = self.shape[:-1]
+        cmicmat.fft_conjugate_symmetry_scaling(N, K, H, spatial_W, self.A, scratch.A)
+
+        return self
+
+    @profile_routine
+    def complex_multiply(self, MICMat inputs, MICMat filters):
+        assert self.shape[0] == inputs.shape[0]
+        assert self.shape[1] == filters.shape[0]
+        assert self.shape[2:] == inputs.shape[2:]
+        assert self.shape[2:] == filters.shape[2:]
+
+        N, K, C, H = self.shape[0], self.shape[1], filters.shape[1], filters.shape[-2]
+        W = filters.shape[-1]/2
+        
+        cmicmat.cmult(N, K, C, H*W, inputs.A, filters.A, self.A)
+
+        return self
+
+    @profile_routine
+    def complex_multiply_gradient(self, MICMat inputs, MICMat inputs_gradient, MICMat filters, MICMat outputs_gradient):
+
+        N, K, C, H = outputs_gradient.shape[0], outputs_gradient.shape[1], filters.shape[1], filters.shape[-2]
+        W = filters.shape[-1]/2
+
+        cmicmat.cmult_gradient(N, K, C, H*W, inputs.A, inputs_gradient.A, filters.A, 
+            self.A, outputs_gradient.A)
+
+        return self
+
+    @profile_routine
+    def conjugate(self):
+        cmicmat.conjugate(self.size/2, self.A)
+
+        return self
+
+    @profile_routine
+    def real_and_imaginary(self):
+        halved_shape = self.shape[:-1] + (self.shape[-1]/2,)
+        
+        cdef MICMat real = MICMat(halved_shape).offload_mic()
+        cdef MICMat imaginary = MICMat(halved_shape).offload_mic()
+
+        cmicmat.real_and_imaginary(real.size, self.A, real.A, imaginary.A)
+
+        return real, imaginary
+
+    @profile_routine
+    def amplitude_and_phase(self):
+        halved_shape = self.shape[:-1] + (self.shape[-1]/2,)
+        
+        cdef MICMat amplitude = MICMat(halved_shape).offload_mic()
+        cdef MICMat phase = MICMat(halved_shape).offload_mic()
+
+        cmicmat.amplitude_and_phase(amplitude.size, self.A, amplitude.A, phase.A)
+
+        return amplitude, phase
 
     def speed_tester(self, MICMat outputs):
         cmicmat.speed_tester(self.shape[0], self.A, outputs.A)
@@ -1057,6 +1213,7 @@ cdef class MICMat:
 
     #     return argmaxs_MICMat
 
+    @profile_routine
     def convolve_gradient(self, MICMat inputs, MICMat filters, MICMat argmaxs,
         MICMat gradient_pooled_outputs, MICMat gradient_inputs, 
         int stride, int padding, int pooling_radius, int pooling_stride, layer, MICMat scratch):
@@ -1302,6 +1459,7 @@ cdef class MICMat:
 
         return self
 
+    @profile_routine
     def update_curve(self, diff, dm1, d0, t, compute):
         a = 0.0001
         if compute == 'curve':
@@ -1506,6 +1664,7 @@ cdef class MICMat:
     #     if AXIS != 2:
     #         cmicmat.index_global_to_local(self.ROWS, self.COLS, I.A_int, AXIS)
 
+    @profile_routine
     def max(self, *args):
         cdef int AXIS = 2
         if not args:
@@ -1516,16 +1675,26 @@ cdef class MICMat:
         S, _ = self.max_and_arg(AXIS)
         return S
 
-    # def max_replace(self, MICMat A, *args):
-    #     cdef int AXIS = 2
-    #     if not args:
-    #         pass
-    #     else:
-    #         AXIS = args[0]
+    @profile_routine
+    def max_replace(self, MICMat S, *args):
+        cdef int AXIS = 2
 
-    #     self.max_and_arg_replace(A, AXIS)
-    #     return self
+        if not args or args[0] == 2:
+            assert self.shape == (1, 1), 'MICMat shape must be (1, 1).'
 
+        else:
+            AXIS = args[0]
+            if AXIS == 0:
+                assert self.shape == (1, S.COLS), 'MICMat shape must be ' + `(1, S.COLS)` + '.'
+
+            if AXIS == 1:
+                assert self.shape == (S.ROWS, 1), 'MICMat shape must be ' + `(S.ROWS, 1)` + '.'
+
+            cmicmat.max_axis_replace(self.ROWS, self.COLS, S.A, AXIS, self.A)
+
+        return self
+
+    @profile_routine
     def min(self, *args):
         cdef int AXIS = 2
         if not args:
@@ -1535,6 +1704,7 @@ cdef class MICMat:
 
         return self.scale(-1.).max(AXIS).scale(-1.)
 
+    @profile_routine
     def argmax(self, *args):
         cdef int AXIS = 2
         if not args:
@@ -1605,6 +1775,7 @@ cdef class MICMat:
 
         return S
 
+    @profile_routine
     def std(self, *args):
         cdef int AXIS = 2
         if not args:

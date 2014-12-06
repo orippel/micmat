@@ -941,6 +941,46 @@ void clip_low(int N, float *restrict A, float LOWER){
     }
 }
 
+// void clip_low(int N, float *restrict A, float LOWER){
+//     #pragma offload target(mic:MIC_DEV) \ 
+//     in(A:length(0) REUSE)
+//     { 
+//     int n;  
+//         int num_cache_lines_64 = N/64;
+//         int N_aligned = N/64*64;
+//         int N_remaining = N - N_aligned;   
+ 
+//         #pragma omp parallel for private(n) shared(N, N_aligned, LOWER, num_cache_lines_64)
+//         for (n = 0; n < num_cache_lines_64; n++)
+//     {
+// #ifdef __MIC__
+//                 __m512 A_load_1 = _mm512_extload_ps(A + 64*n, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+//                 __m512 A_load_2 = _mm512_extload_ps(A + 64*n + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+//                 __m512 A_load_3 = _mm512_extload_ps(A + 64*n + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+//                 __m512 A_load_4 = _mm512_extload_ps(A + 64*n + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+//         __m512 v_LOWER = _mm512_set1_ps(LOWER);
+//         __mmask16 mask_1 = _mm512_cmplt_ps_mask(A_load_1, v_LOWER);
+//         __mmask16 mask_2 = _mm512_cmplt_ps_mask(A_load_2, v_LOWER);
+//         __mmask16 mask_3 = _mm512_cmplt_ps_mask(A_load_3, v_LOWER);
+//         __mmask16 mask_4 = _mm512_cmplt_ps_mask(A_load_4, v_LOWER);
+//         _mm512_mask_mov_ps(A_load_1, mask_1, v_LOWER); 
+//         _mm512_mask_mov_ps(A_load_2, mask_2, v_LOWER); 
+//         _mm512_mask_mov_ps(A_load_3, mask_3, v_LOWER); 
+//         _mm512_mask_mov_ps(A_load_4, mask_4, v_LOWER);
+//                 _mm512_extstore_ps((float *)(A + 64*n),        A_load_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+//                 _mm512_extstore_ps((float *)(A + 64*n + 16),   A_load_2, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+//                 _mm512_extstore_ps((float *)(A + 64*n + 32),   A_load_3, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+//                 _mm512_extstore_ps((float *)(A + 64*n + 48),   A_load_4, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+// #endif
+//     }
+//         if(A[N_aligned : N_remaining] < LOWER) A[N_aligned : N_remaining]  = LOWER;
+
+//         //for (n = N_aligned; n < N; n++){
+//         //  if (A[n] < LOWER) A[n] = LOWER;
+//         //}
+//     }
+// }
+
 void flooro(int N, float *restrict A){
     #pragma offload target(mic:MIC_DEV) \ 
     in(A:length(0) REUSE)
@@ -1183,7 +1223,7 @@ void powo(int N, float *restrict A, float b){
         }
         A[N_aligned : N_remaining] = pow(A[N_aligned : N_remaining], b);
 
-        A[0 : N_remaining] = pow(A[N_aligned : N_remaining], b);
+        // A[0 : N_remaining] = pow(A[N_aligned : N_remaining], b);
         // int n;
         // #pragma omp parallel for private(n)
         // for (n = 0; n < N; n++)
@@ -1210,7 +1250,44 @@ void scale(int N, float *restrict A, float c){
 }
 
 void mult(int ROWS_A, int COLS_A, float *restrict A, int ROWS_X, int COLS_X, float *restrict X){    
-    if (COLS_X == 1 && ROWS_X > 1){
+    if (ROWS_X == ROWS_A && COLS_X == COLS_A){
+        #pragma offload target(mic:MIC_DEV) \ 
+        in(A:length(0) REUSE) \
+        in(X:length(0) REUSE)
+        { 
+            // A[0:ROWS_A*COLS_A] *= X[0:ROWS_A*COLS_A];
+            int N = ROWS_A * COLS_A; 
+            int n;
+            int num_cache_lines_64 = N/64;
+            int N_aligned = N/64*64;
+            int N_remaining = N - N_aligned;   
+            
+            #pragma omp parallel for private(n) shared(N, N_aligned, num_cache_lines_64)
+            // for (n = 0; n < num_cache_lines_64; n++)
+            for (n = 0; n < N_aligned; n += 64)
+            {
+                #ifdef __MIC__
+                float *X_pointer = X + n;
+                float *A_pointer = A + n;
+
+                __m512 load_1 = _mm512_extload_ps(X_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 load_2 = _mm512_extload_ps(X_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 load_3 = _mm512_extload_ps(X_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 load_4 = _mm512_extload_ps(X_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_1 = _mm512_extload_ps(A_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_2 = _mm512_extload_ps(A_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_3 = _mm512_extload_ps(A_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_4 = _mm512_extload_ps(A_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                _mm512_extstore_ps((float *)(A_pointer),        _mm512_mul_ps(A_load_1, load_1), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                _mm512_extstore_ps((float *)(A_pointer + 16),   _mm512_mul_ps(A_load_2, load_2), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                _mm512_extstore_ps((float *)(A_pointer + 32),   _mm512_mul_ps(A_load_3, load_3), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                _mm512_extstore_ps((float *)(A_pointer + 48),   _mm512_mul_ps(A_load_4, load_4), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                #endif
+            }
+            A[N_aligned : N_remaining] *= X[N_aligned : N_remaining];
+        }
+    }
+    else if (COLS_X == 1 && ROWS_X > 1){
         #pragma offload target(mic:MIC_DEV) \ 
         in(A:length(0) REUSE) \ 
         in(X:length(0) REUSE)
@@ -1250,44 +1327,7 @@ void mult(int ROWS_A, int COLS_A, float *restrict A, int ROWS_X, int COLS_X, flo
         { 
           cblas_sscal(ROWS_A*COLS_A, X[0], A, 1);
         }
-    } 
-    else if (ROWS_X == ROWS_A && COLS_X == COLS_A){
-        #pragma offload target(mic:MIC_DEV) \ 
-        in(A:length(0) REUSE) \
-        in(X:length(0) REUSE)
-        { 
-            // A[0:ROWS_A*COLS_A] *= X[0:ROWS_A*COLS_A];
-            int N = ROWS_A * COLS_A; 
-            int n;
-            int num_cache_lines_64 = N/64;
-            int N_aligned = N/64*64;
-            int N_remaining = N - N_aligned;   
-            
-            #pragma omp parallel for private(n) shared(N, N_aligned, num_cache_lines_64)
-            // for (n = 0; n < num_cache_lines_64; n++)
-            for (n = 0; n < N_aligned; n += 64)
-            {
-                #ifdef __MIC__
-                float *X_pointer = X + n;
-                float *A_pointer = A + n;
-
-                __m512 load_1 = _mm512_extload_ps(X_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                __m512 load_2 = _mm512_extload_ps(X_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                __m512 load_3 = _mm512_extload_ps(X_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                __m512 load_4 = _mm512_extload_ps(X_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                __m512 A_load_1 = _mm512_extload_ps(A_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                __m512 A_load_2 = _mm512_extload_ps(A_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                __m512 A_load_3 = _mm512_extload_ps(A_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                __m512 A_load_4 = _mm512_extload_ps(A_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-                _mm512_extstore_ps((float *)(A_pointer),        _mm512_mul_ps(A_load_1, load_1), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
-                _mm512_extstore_ps((float *)(A_pointer + 16),   _mm512_mul_ps(A_load_2, load_2), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
-                _mm512_extstore_ps((float *)(A_pointer + 32),   _mm512_mul_ps(A_load_3, load_3), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
-                _mm512_extstore_ps((float *)(A_pointer + 48),   _mm512_mul_ps(A_load_4, load_4), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
-                #endif
-            }
-            A[N_aligned : N_remaining] *= X[N_aligned : N_remaining];
-        }
-    } 
+    }  
     else printf("Update matrix dimensions don\'t match.");
 }
 
@@ -1361,11 +1401,42 @@ void update(int a1, int a2, int a3, int a4, int a5, int a6, float *A, int b1, in
     {   
         if (a1 == b1 && a2 == b2 & a3 == b3 && a4 == b4 && a5 == b5 && a6 == b6){
             int N = a1*a2*a3*a4*a5*a6; 
-            int a4a5a6 = a4*a5*a6;
-            #pragma omp parallel for shared(a4a5a6)
-            for (int i1i2i3 = 0; i1i2i3 < a1*a2*a3; i1i2i3++){
-                A[i1i2i3*a4a5a6 : a4a5a6] += ALPHA * B[i1i2i3*a4a5a6 : a4a5a6];
+            int n;
+            int num_cache_lines_64 = N/64;
+            int N_aligned = N/64*64;
+            int N_remaining = N - N_aligned;   
+            
+            #pragma omp parallel for private(n) shared(N, N_aligned, num_cache_lines_64)
+            // for (n = 0; n < num_cache_lines_64; n++)
+            for (n = 0; n < N_aligned; n += 64)
+            {
+                #ifdef __MIC__
+                float *B_pointer = B + n;
+                float *A_pointer = A + n;
+
+                __m512 v_alpha = _mm512_set1_ps(ALPHA);
+
+                __m512 B_load_1 = _mm512_extload_ps(B_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 B_load_2 = _mm512_extload_ps(B_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 B_load_3 = _mm512_extload_ps(B_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 B_load_4 = _mm512_extload_ps(B_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_1 = _mm512_extload_ps(A_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_2 = _mm512_extload_ps(A_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_3 = _mm512_extload_ps(A_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_4 = _mm512_extload_ps(A_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                _mm512_extstore_ps((float *)(A_pointer),        _mm512_add_ps(A_load_1, _mm512_mul_ps(B_load_1, v_alpha)), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                _mm512_extstore_ps((float *)(A_pointer + 16),   _mm512_add_ps(A_load_2, _mm512_mul_ps(B_load_2, v_alpha)), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                _mm512_extstore_ps((float *)(A_pointer + 32),   _mm512_add_ps(A_load_3, _mm512_mul_ps(B_load_3, v_alpha)), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                _mm512_extstore_ps((float *)(A_pointer + 48),   _mm512_add_ps(A_load_4, _mm512_mul_ps(B_load_4, v_alpha)), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                #endif
             }
+            A[N_aligned : N_remaining] += ALPHA*B[N_aligned : N_remaining];
+
+            // int a4a5a6 = a4*a5*a6;
+            // #pragma omp parallel for shared(a4a5a6)
+            // for (int i1i2i3 = 0; i1i2i3 < a1*a2*a3; i1i2i3++){
+            //     A[i1i2i3*a4a5a6 : a4a5a6] += ALPHA * B[i1i2i3*a4a5a6 : a4a5a6];
+            // }
         }
 
         else{
@@ -1466,9 +1537,33 @@ void update_const(int N, float *restrict A, float c){
     #pragma offload target(mic:MIC_DEV) \ 
         in(A:length(0) REUSE)
         { 
-          float *restrict Y = ones_mic(N);
-          cblas_saxpy(N, c, Y, 1, A, 1);
-          _mm_free(Y);
+            int n;
+            int num_cache_lines_64 = N/64;
+            int N_aligned = N/64*64;
+            int N_remaining = N - N_aligned;   
+            
+            #pragma omp parallel for private(n) shared(N, N_aligned, num_cache_lines_64)
+            for (n = 0; n < N_aligned; n += 64)
+            {
+                #ifdef __MIC__
+                float *A_pointer = A + n;
+
+                __m512 v_c = _mm512_set1_ps(c);
+
+                __m512 A_load_1 = _mm512_extload_ps(A_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_2 = _mm512_extload_ps(A_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_3 = _mm512_extload_ps(A_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_4 = _mm512_extload_ps(A_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                _mm512_extstore_ps((float *)(A_pointer),        _mm512_add_ps(A_load_1, v_c), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                _mm512_extstore_ps((float *)(A_pointer + 16),   _mm512_add_ps(A_load_2, v_c), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                _mm512_extstore_ps((float *)(A_pointer + 32),   _mm512_add_ps(A_load_3, v_c), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                _mm512_extstore_ps((float *)(A_pointer + 48),   _mm512_add_ps(A_load_4, v_c), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                #endif
+            }
+            A[N_aligned : N_remaining] += c;
+          // float *restrict Y = ones_mic(N);
+          // cblas_saxpy(N, c, Y, 1, A, 1);
+          // _mm_free(Y);
           // free(Y);
         }
 }
@@ -1837,6 +1932,34 @@ int *max_axis(int ROWS_A, int COLS_A, float *restrict A, int AXIS){
         }
 
     return S;
+}
+
+void max_axis_replace(int ROWS_A, int COLS_A, float *restrict A, int AXIS, float *restrict S){
+    #pragma offload target(mic:MIC_DEV) \ 
+        in(A:length(0) REUSE) \
+        in(S:length(0) REUSE)
+    {
+
+        if (AXIS == 0){
+            int n;
+            #pragma omp parallel for private(n)
+            for (n = 0; n < COLS_A; n++){
+                S[n] = __sec_reduce_max(A[n : ROWS_A : COLS_A]);
+            }
+            
+        }
+        else if (AXIS == 1){
+            int n;
+            #pragma omp parallel for private(n)
+              for (n = 0; n < ROWS_A; n++){
+                S[n] = __sec_reduce_max(A[n*COLS_A : COLS_A]);
+            }
+            
+        }
+        else if (AXIS == 2){
+            S[0] = cblas_isamax(ROWS_A*COLS_A, A, 1);
+        }
+    }
 }
 
 void index_global_to_local(int ROWS, int COLS, int *restrict A, int AXIS){

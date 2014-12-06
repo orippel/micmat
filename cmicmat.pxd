@@ -166,6 +166,8 @@ cdef extern from "micmat.h":
 
     int *max_axis(int ROWS_A, int COLS_A, float *A, int AXIS)
 
+    void max_axis_replace(int ROWS_A, int COLS_A, float *A, int AXIS, float *S)
+
     void index_global_to_local(int ROWS_A, int COLS_A, int *A, int AXIS)
 
     float sumo(int N, float *A)
@@ -199,6 +201,10 @@ cdef extern from "micmat.h":
     void convolution_layer4(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH)
     void convolution_layer5(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH)
     void convolution_layer6(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH)
+    void convolution_layer7(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH)
+    void convolution_layer8(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH)
+    void convolution_layer9(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH)
+    void convolution_layer10(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH)
 
     void get_argmaxs(int N, int C, int H, int W, float *INPUTS, float *OUTPUTS, int *ARGMAXS)
 
@@ -208,6 +214,11 @@ cdef extern from "micmat.h":
     void convolution_gradient_layer4(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH)
     void convolution_gradient_layer5(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH)
     void convolution_gradient_layer6(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH)
+    void convolution_gradient_layer7(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH)
+    void convolution_gradient_layer8(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH)
+    void convolution_gradient_layer9(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH)
+    void convolution_gradient_layer10(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, int padding, float *FILTERS, int *ARGMAXS, float *D_OUTPUTS, float *D_INPUTS, float *D_FILTERS, float *SCRATCH)
+
 
 
     void local_filtering_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int *ARGMAXS, int stride, int padding, int pooling_radius, int pooling_stride, int offloaded, float *SCRATCH)
@@ -239,6 +250,26 @@ cdef extern from "micmat.h":
     # int *convolve_and_pool_layer1(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int pool_radius, int stride, int *ARGMAXS, int argmaxs_fixed, int offloaded)
 
     # int *convolve_and_pool_layer2(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int pool_radius, int stride, int *ARGMAXS, int argmaxs_fixed, int offloaded)
+
+    void fft(int N, int H, int W, int IS_FORWARD, float *SPATIAL, float *FREQUENCIES)
+
+    void fft_full(int N, int H, int W, int IS_FORWARD, float *SPATIAL, float *FREQUENCIES)
+
+    void wipe_out_irrelevant_entries(int N, int H, int W, float *INPUTS)
+
+    void wipe_out_irrelevant_entries_full(int N, int H, int W, float *INPUTS)
+
+    void cmult(int N, int K, int C, int HW, float *INPUTS, float *FILTERS, float *OUTPUTS)
+
+    void cmult_gradient(int N, int K, int C, int HW, float *INPUTS, float *GRADIENT_INPUTS, float *FILTERS, float *GRADIENT_FILTERS, float *GRADIENT_OUTPUTS)
+
+    void conjugate(int N, float *A)
+
+    void fft_conjugate_symmetry_scaling(int N, int K, int H, int W, float *A, float *scratch)
+
+    void real_and_imaginary(int N, float *A, float *REAL, float *IMAGINARY)
+
+    void amplitude_and_phase(int N, float *A, float *AMPLITUDE, float *PHASE)
 
     void gram_schmidt(int N, int C, float *A, float *SCRATCH)
 
