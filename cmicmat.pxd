@@ -70,7 +70,7 @@ cdef extern from "micmat.h":
 
     void greater_replace(int N, float *A, float B)
 
-    float *labels_to_vectors(int N, int K, float *A)
+    void labels_to_vectors(int N, int K, float *A, float *targets)
 
     void lg(int N, float *A)
 

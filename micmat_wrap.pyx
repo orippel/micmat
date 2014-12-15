@@ -55,6 +55,7 @@ cdef class MICMat:
     cdef int dtype # 0 is float, 1 is int
     cdef float *A
     cdef int *A_int
+    cdef char *data_format
 
     def __cinit__(self, *args):
         if not args:
@@ -537,8 +538,8 @@ cdef class MICMat:
 
     @profile_routine
     def apply_dropout(self, MICMat dropout_mask):
-        #assert dropout_mask.shape == self.shape[1:], 'Shape of array ' + `self.shape` + ' and shape of mask ' + `dropout_mask.shape` + ' don\'t match.'
-        assert dropout_mask.shape == self.shape, 'Shape of array ' + `self.shape` + ' and shape of mask ' + `dropout_mask.shape` + ' don\'t match.'
+        assert dropout_mask.shape[1:] == self.shape[1:], 'Shape of array ' + `self.shape` + ' and shape of mask ' + `dropout_mask.shape` + ' don\'t match.'
+        # assert dropout_mask.shape == self.shape, 'Shape of array ' + `self.shape` + ' and shape of mask ' + `dropout_mask.shape` + ' don\'t match.'
         
         cmicmat.apply_dropout(self.shape[0], np.product(self.shape[1:]), self.A, dropout_mask.A_int)
         
@@ -765,38 +766,43 @@ cdef class MICMat:
         cmicmat.get_argmaxs(N, C, H, W, inputs.A, self.A, argmaxs.A_int)
     
     @profile_routine
-    def permute_dimensions(self, dimensions, MICMat scratch):
+    def permute_dimensions(self, dimensions, MICMat output):
         D1, D2, D3, D4 = self.shape
         perm1, perm2, perm3, perm4 = dimensions
         
         if self.dtype == 0:
-            cmicmat.permute_dimensions(D1, D2, D3, D4, perm1, perm2, perm3, perm4, self.A, scratch.A)
+            cmicmat.permute_dimensions(D1, D2, D3, D4, perm1, perm2, perm3, perm4, self.A, output.A)
 
         elif self.dtype == 1:
-            cmicmat.permute_dimensions_int(D1, D2, D3, D4, perm1, perm2, perm3, perm4, self.A_int, scratch.A)            
+            cmicmat.permute_dimensions_int(D1, D2, D3, D4, perm1, perm2, perm3, perm4, self.A_int, output.A)            
 
-        self.shape = tuple([self.shape[p] for p in dimensions])
+        cdef MICMat reshaped_object
+        reshaped_object = output if self.dtype == 0 else self
+        reshaped_object.shape = tuple([self.shape[p] for p in dimensions])
 
-        return self
+        return reshaped_object
     
     @profile_routine
-    def interleave_block(self, int block, MICMat scratch):
+    def interleave_block(self, int block, MICMat output):
         N = self.shape[-1]
         C = np.product(self.shape[0:-1])
         
         if N != block:
             if self.dtype == 0:
-                cmicmat.interleave_block(N, C, block, self.A, scratch.A)
+                cmicmat.interleave_block(N, C, block, self.A, output.A)
 
             elif self.dtype == 1:
-                cmicmat.interleave_block_int(N, C, block, self.A_int, scratch.A) 
+                cmicmat.interleave_block_int(N, C, block, self.A_int, output.A) 
 
-        self.shape = (N/block,) + self.shape[0:-1] + (block,)
+        cdef MICMat reshaped_object
+        reshaped_object = output if self.dtype == 0 else self
 
-        return self
+        reshaped_object.shape = (N/block,) + self.shape[0:-1] + (block,)
+
+        return reshaped_object
     
     @profile_routine
-    def uninterleave_block(self, MICMat scratch):
+    def uninterleave_block(self, MICMat output):
         block = self.shape[-1]
         N_block = self.shape[0]
         N = block*N_block
@@ -804,38 +810,50 @@ cdef class MICMat:
 
         if N_block != 1:
             if self.dtype == 0:
-                cmicmat.uninterleave_block(N, C, block, self.A, scratch.A)
+                cmicmat.uninterleave_block(N, C, block, self.A, output.A)
 
             elif self.dtype == 1:
-                cmicmat.uninterleave_block_int(N, C, block, self.A_int, scratch.A)
+                cmicmat.uninterleave_block_int(N, C, block, self.A_int, output.A)
 
-        self.shape = self.shape[1:-1] + (N,)
+        else:
+            cmicmat.replace_mic(self.size, output.A, self.A)
 
-        return self
+        cdef MICMat reshaped_object
+        reshaped_object = output if self.dtype == 0 else self
+
+        reshaped_object.shape = self.shape[1:-1] + (N,)
+
+        return reshaped_object
     
     @profile_routine
-    def interleave_for_gradient(self, int block, MICMat scratch):
+    def interleave_for_gradient(self, int block, MICMat output):
         N, C, H, W = self.shape
         
         if block > 1:
-            cmicmat.interleave_for_gradient(N, C, H, W, block, self.A, scratch.A)
+            cmicmat.interleave_for_gradient(N, C, H, W, block, self.A, output.A)
 
-        self.shape = (N, C/block, H, W, block)
+        output.shape = (N, C/block, H, W, block)
 
-        return self
+        return output
     
     @profile_routine
-    def uninterleave_for_gradient(self, MICMat scratch):
+    def uninterleave_for_gradient(self, MICMat output):
         N, C_block, H, W, block = self.shape
 
         C = C_block * block
         
         if block > 1:
-            cmicmat.uninterleave_for_gradient(N, C, H, W, block, self.A, scratch.A)
+            cmicmat.uninterleave_for_gradient(N, C, H, W, block, self.A, output.A)
 
-        self.shape = (N, C, H, W)
+        output.shape = (N, C, H, W)
         
-        return self
+        return output
+
+    # def convert_data_structure(self, MICMat output, char *target_type, **kwargs):
+    #     reshape_only = kwargs.pop('reshape_only', False)
+
+    #     inputs.rotate_dimensions('forward', inputs_rotated)
+    #     inputs_rotated.interleave_block(layer['N block'], inputs_interleaved)
 
     @profile_routine
     def convolution(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch):
@@ -1290,22 +1308,26 @@ cdef class MICMat:
         return self
 
     @profile_routine
-    def rotate_dimensions(self, direction, MICMat scratch):
+    def rotate_dimensions(self, direction, MICMat output):
+        cdef MICMat reshaped_object
+
+        reshaped_object = output if self.dtype == 0 else self
+
         if direction == 'forward':
             rows = self.shape[0]
             cols = np.product(self.shape[1:])
-            self.shape = self.shape[1:] + (self.shape[0],)
+            reshaped_object.shape = self.shape[1:] + (self.shape[0],)
 
         elif direction == 'backward':
             rows = np.product(self.shape[0:-1])
             cols = self.shape[-1]
-            self.shape = (self.shape[-1],) + self.shape[0:-1]
+            reshaped_object.shape = (self.shape[-1],) + self.shape[0:-1]
 
         if self.dtype == 0:
-            cmicmat.transpose_replace(rows, cols, self.A, scratch.A)
+            cmicmat.transpose_replace(rows, cols, self.A, output.A)
 
         elif self.dtype == 1:
-            cmicmat.transpose_replace_int(rows, cols, self.A_int, scratch.A)
+            cmicmat.transpose_replace_int(rows, cols, self.A_int, output.A)
 
         return self
 
@@ -1571,6 +1593,7 @@ cdef class MICMat:
             if AXIS == 1:
                 assert self.shape == (A.ROWS, 1), 'MICMat shape must be ' + `(A.ROWS, 1)` + '.'
             
+            # self.fill_zeros()
             cmicmat.sum_axis_replace(A.ROWS, A.COLS, A.A, AXIS, self.A)    
         
         return self 
@@ -1936,13 +1959,11 @@ cdef class MICMat:
 
 ######### misc
     @profile_routine
-    def labels_to_vectors(self, int K):
-        cdef MICMat S = MICMat()
-        S.shape = (self.shape[0], K)
-        S.offloaded = self.offloaded
-        S.A = cmicmat.labels_to_vectors(self.shape[0], K, self.A)
-
-        return S   
+    def labels_to_vectors(self, int K, MICMat targets):
+        # cdef MICMat S = MICMat()
+        # S.shape = (self.shape[0], K)
+        # S.offloaded = self.offloaded
+        cmicmat.labels_to_vectors(self.shape[0], K, self.A, targets.A)
 
     @profile_routine
     def frac_zero(self):
@@ -1956,55 +1977,113 @@ cdef class MICMat:
 
 cdef class Scratch(MICMat):
     cdef list shapes
+    cdef list shifts
+    cdef MICMat end
 
     def __cinit__(self, *args):
         self.shapes = []
+        self.shifts = [0]
 
     def __getattr__(self, name):
         if name == 'shapes':
             return self.shapes
 
+        elif name == 'contents_size':
+            return self.shifts[-1]
+
+        elif name == 'end':
+            return self.end
+
         else:
             return MICMat.__getattr__(self, name)
 
     @profile_routine
-    def reset(self, args):
-        if type(args) == MICMat:
+    def reset(self, *args):
+        cdef MICMat S
+
+        if not args:
             self.shapes = []
-            return self.append(args)
+            self.shifts = [0]
+
+        else:
+            if type(args[0]) == MICMat:
+                self.shapes = []
+                self.shifts = [0]
+                S = self.append(args[0])
+
+            elif type(args[0]) == tuple:
+                self.shapes = [args[0]]
+                self.shifts = [0, np.product(args[0])]
+                S = self.get(0)
+
+            return S
+
+    @profile_routine
+    def append(self, args, **kwargs):
+        should_fill_zeros = kwargs.pop('fill_zeros', False)
+        cdef MICMat V
+
+        if type(args) == MICMat:
+            V = args
+            assert self.offloaded == V.offloaded, 'Input MICMat must be offloaded to the same resource as the scratch!'
+            
+            if self.offloaded:
+                cmicmat.replace_partial_mic(self.size, self.contents_size, self.A, V.size, 0, V.A)
+
+            else:
+                cmicmat.replace_partial_host(self.size, self.contents_size, self.A, V.size, 0, V.A)
+
+            shape = V.shape
+            new_size = V.size
 
         elif type(args) == tuple:
-            self.shapes = [args]
-            return self.get(0)
+            shape = args
+            new_size = np.product(shape)
+            
+        assert self.size >= self.contents_size + new_size, 'The scratch space of size ' + `self.size` + ' is out of memory with contents of size ' + `self.contents_size` + ' and incoming object of size ' + `new_size` + '!'
+        self.shapes.append(shape)
+        self.shifts.append(self.shifts[-1] + new_size)
 
-    @profile_routine
-    def append(self, MICMat V):
-        assert self.offloaded == V.offloaded, 'Input MICMat must be offloaded to the same resource as the scratch!'
-        assert self.size >= self.contents_size() + V.size, 'The scratch space of size ' + `self.size` + ' is out of memory with contents of size ' + `self.contents_size()` + ' and incoming object of size ' + `V.size` + '!'
-        cmicmat.replace_partial_host(self.size, self.contents_size(), self.A, V.size, 0, V.A)
-        if self.offloaded:
-            cmicmat.replace_partial_mic(self.size, self.contents_size(), self.A, V.size, 0, V.A)
-
-        self.shapes.append(V.shape)
-
-        return self.get(len(self.shapes) - 1)
-
-    @profile_routine
-    def get(self, index):
-        cdef MICMat S = MICMat()
-        S.shape = self.shapes[index]
-        S.offloaded = self.offloaded
-        S.persist = 1
-        S.A = cmicmat.get_partial(S.size, self.contents_size(index), self.A)
+        cdef MICMat S = self.get(len(self.shapes) - 1)
+        if should_fill_zeros:
+            S.fill_zeros()
         return S
 
-    def contents_size(self, *args):
-        if not args:
-            return sum([np.product(shape) for shape in self.shapes])
-        
+    def update_end(self):
+        self.end = self.get()
+
+    def __setattr__(self, name, value):
+        if name == 'end':
+            self.end = value
+
         else:
+            MICMat.__setattr__(self, name, value)
+
+    @profile_routine
+    def get(self, *args):
+        cdef MICMat S = MICMat()
+        
+        if not args: # get pointer to end of scratch
+            S.shape = (self.size - self.contents_size, 1)
+            shift = self.contents_size
+
+        else: 
             index = args[0]
-            return sum([np.product(shape) for shape in self.shapes[:index]])
+            S.shape = self.shapes[index]
+            shift = self.shifts[index]
+
+        S.offloaded = self.offloaded 
+        S.persist = 1
+        S.A = cmicmat.get_partial(S.size, shift, self.A)
+        return S
+
+    # @profile_routine
+    # def contents_size(self, index):
+    #     # return sum([np.product(shape) for shape in self.shapes[:index]])
+    #     if index == 0:
+    #         return 0
+    #     else:
+    #         return self.shifts[index-1]
 
 # def initialize_locks():
 #     cdef OmpLock lock

@@ -708,8 +708,8 @@ void offload_mic(int N, float *restrict A){
 
     if (!mic_status.result == OFFLOAD_SUCCESS){
         printf("Offload failed.\n");
-        if (mic_status.result == OFFLOAD_OUT_OF_MEMORY) {
-            printf("Offload failed due to insufficient memory.\n"); }
+        if (mic_status.result == OFFLOAD_OUT_OF_MEMORY)
+            printf("Offload failed due to insufficient memory.\n");
     }
 }
 
@@ -820,7 +820,32 @@ void replace_partial_mic(int N_A, int SHIFT_A, float *restrict A, int N_B, int S
     in(B:length(0) REUSE) \
     in(A:length(0) REUSE)
     { 
-      cblas_scopy(N_B, B + SHIFT_B, 1, A + SHIFT_A, 1);
+      // cblas_scopy(N_B, B + SHIFT_B, 1, A + SHIFT_A, 1);
+        A += SHIFT_A;
+        B += SHIFT_B;
+        
+        int n;
+        int num_cache_lines_64 = N_B/64;
+        int N_aligned = N_B/64*64;
+        int N_remaining = N_B - N_aligned;   
+ 
+        #pragma omp parallel for private(n) shared(N_B, N_aligned, num_cache_lines_64)
+        for (n = 0; n < num_cache_lines_64; n++)
+    {
+#ifdef __MIC__
+                __m512 load_1 = _mm512_extload_ps(B + 64*n, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 load_2 = _mm512_extload_ps(B + 64*n + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 load_3 = _mm512_extload_ps(B + 64*n + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 load_4 = _mm512_extload_ps(B + 64*n + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                _mm512_storenrngo_ps((float *)(A + 64*n),        load_1);
+                _mm512_storenrngo_ps((float *)(A + 64*n + 16),   load_2);
+                _mm512_storenrngo_ps((float *)(A + 64*n + 32),   load_3);
+                _mm512_storenrngo_ps((float *)(A + 64*n + 48),   load_4);
+
+#endif
+    }
+        A[N_aligned : N_remaining] = B[N_aligned : N_remaining];
+
         // int n;
         // #pragma omp parallel for private(n)
         // for (n = 0; n < N_B; n++){
@@ -926,60 +951,64 @@ void clip(int N, float *restrict A, float LOWER, float UPPER){
     }
 }
 
-void clip_low(int N, float *restrict A, float LOWER){
-    #pragma offload target(mic:MIC_DEV) \ 
-    in(A:length(0) REUSE)
-    { 
-        if (A[0:N] < LOWER){
-            A[0:N] = LOWER;
-        }
-        // int n;
-        // #pragma omp parallel for private(n) shared(LOWER)
-        //     for (n = 0; n < N; n++){
-        //       if (A[n] < LOWER) A[n] = LOWER;
-        //     }
-    }
-}
-
 // void clip_low(int N, float *restrict A, float LOWER){
 //     #pragma offload target(mic:MIC_DEV) \ 
 //     in(A:length(0) REUSE)
 //     { 
-//     int n;  
-//         int num_cache_lines_64 = N/64;
-//         int N_aligned = N/64*64;
-//         int N_remaining = N - N_aligned;   
- 
-//         #pragma omp parallel for private(n) shared(N, N_aligned, LOWER, num_cache_lines_64)
-//         for (n = 0; n < num_cache_lines_64; n++)
-//     {
-// #ifdef __MIC__
-//                 __m512 A_load_1 = _mm512_extload_ps(A + 64*n, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-//                 __m512 A_load_2 = _mm512_extload_ps(A + 64*n + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-//                 __m512 A_load_3 = _mm512_extload_ps(A + 64*n + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-//                 __m512 A_load_4 = _mm512_extload_ps(A + 64*n + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
-//         __m512 v_LOWER = _mm512_set1_ps(LOWER);
-//         __mmask16 mask_1 = _mm512_cmplt_ps_mask(A_load_1, v_LOWER);
-//         __mmask16 mask_2 = _mm512_cmplt_ps_mask(A_load_2, v_LOWER);
-//         __mmask16 mask_3 = _mm512_cmplt_ps_mask(A_load_3, v_LOWER);
-//         __mmask16 mask_4 = _mm512_cmplt_ps_mask(A_load_4, v_LOWER);
-//         _mm512_mask_mov_ps(A_load_1, mask_1, v_LOWER); 
-//         _mm512_mask_mov_ps(A_load_2, mask_2, v_LOWER); 
-//         _mm512_mask_mov_ps(A_load_3, mask_3, v_LOWER); 
-//         _mm512_mask_mov_ps(A_load_4, mask_4, v_LOWER);
-//                 _mm512_extstore_ps((float *)(A + 64*n),        A_load_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
-//                 _mm512_extstore_ps((float *)(A + 64*n + 16),   A_load_2, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
-//                 _mm512_extstore_ps((float *)(A + 64*n + 32),   A_load_3, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
-//                 _mm512_extstore_ps((float *)(A + 64*n + 48),   A_load_4, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
-// #endif
-//     }
-//         if(A[N_aligned : N_remaining] < LOWER) A[N_aligned : N_remaining]  = LOWER;
-
-//         //for (n = N_aligned; n < N; n++){
-//         //  if (A[n] < LOWER) A[n] = LOWER;
-//         //}
+//         if (A[0:N] < LOWER){
+//             A[0:N] = LOWER;
+//         }
+//         // int n;
+//         // #pragma omp parallel for private(n) shared(LOWER)
+//         //     for (n = 0; n < N; n++){
+//         //       if (A[n] < LOWER) A[n] = LOWER;
+//         //     }
 //     }
 // }
+
+void clip_low(int N, float *restrict A, float LOWER){
+    #pragma offload target(mic:MIC_DEV) \ 
+    in(A:length(0) REUSE)
+    { 
+    int n;  
+        int num_cache_lines_64 = N/64;
+        int N_aligned = N/64*64;
+        int N_remaining = N - N_aligned;   
+ 
+        #pragma omp parallel for private(n) shared(N, N_aligned, LOWER, num_cache_lines_64)
+        for (n = 0; n < num_cache_lines_64; n++)
+    {
+#ifdef __MIC__
+                __m512 A_load_1 = _mm512_extload_ps(A + 64*n, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_2 = _mm512_extload_ps(A + 64*n + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_3 = _mm512_extload_ps(A + 64*n + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 A_load_4 = _mm512_extload_ps(A + 64*n + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+        __m512 v_LOWER = _mm512_set1_ps(LOWER);
+        // __mmask16 mask_1 = _mm512_cmplt_ps_mask(A_load_1, v_LOWER);
+        // __mmask16 mask_2 = _mm512_cmplt_ps_mask(A_load_2, v_LOWER);
+        // __mmask16 mask_3 = _mm512_cmplt_ps_mask(A_load_3, v_LOWER);
+        // __mmask16 mask_4 = _mm512_cmplt_ps_mask(A_load_4, v_LOWER);
+        __mmask16 mask_1 = _mm512_cmp_ps_mask(A_load_1, v_LOWER, _MM_CMPINT_LT);
+        __mmask16 mask_2 = _mm512_cmp_ps_mask(A_load_2, v_LOWER, _MM_CMPINT_LT);
+        __mmask16 mask_3 = _mm512_cmp_ps_mask(A_load_3, v_LOWER, _MM_CMPINT_LT);
+        __mmask16 mask_4 = _mm512_cmp_ps_mask(A_load_4, v_LOWER, _MM_CMPINT_LT);
+        A_load_1 = _mm512_mask_mov_ps(A_load_1, mask_1, v_LOWER); 
+        A_load_2 = _mm512_mask_mov_ps(A_load_2, mask_2, v_LOWER); 
+        A_load_3 = _mm512_mask_mov_ps(A_load_3, mask_3, v_LOWER); 
+        A_load_4 = _mm512_mask_mov_ps(A_load_4, mask_4, v_LOWER);
+                _mm512_extstore_ps((float *)(A + 64*n),        A_load_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                _mm512_extstore_ps((float *)(A + 64*n + 16),   A_load_2, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                _mm512_extstore_ps((float *)(A + 64*n + 32),   A_load_3, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                _mm512_extstore_ps((float *)(A + 64*n + 48),   A_load_4, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+#endif
+    }
+        if(A[N_aligned : N_remaining] < LOWER) A[N_aligned : N_remaining]  = LOWER;
+
+        //for (n = N_aligned; n < N; n++){
+        //  if (A[n] < LOWER) A[n] = LOWER;
+        //}
+    }
+}
 
 void flooro(int N, float *restrict A){
     #pragma offload target(mic:MIC_DEV) \ 
@@ -1091,12 +1120,51 @@ void greater_replace(int N, float *restrict A, float B){
   #pragma offload target(mic:MIC_DEV) \ 
     in(A:length(0) REUSE)
     {   
-        if (A[0:N] > B){
-            A[0:N] = 1.f;
-        }
-        else{
-            A[0:N] = 0.f;
-        }
+        // if (A[0:N] > B){
+        //     A[0:N] = 1.f;
+        // }
+        // else{
+        //     A[0:N] = 0.f;
+        // }
+        int n;
+        int num_cache_lines_64 = N/64;
+        int N_aligned = N/64*64;
+        int N_remaining = N - N_aligned;   
+ 
+        #pragma omp parallel for private(n) shared(B, N, N_aligned, num_cache_lines_64)
+        for (n = 0; n < num_cache_lines_64; n++)
+    {
+#ifdef __MIC__
+        __m512 load_1 = _mm512_extload_ps(A + 64*n, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+        __m512 load_2 = _mm512_extload_ps(A + 64*n + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+        __m512 load_3 = _mm512_extload_ps(A + 64*n + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+        __m512 load_4 = _mm512_extload_ps(A + 64*n + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+        __m512 v_B = _mm512_set1_ps(B);
+        __mmask16 mask_1 = _mm512_cmplt_ps_mask(v_B, load_1); // _mm512_mask_mov_ps??
+        __mmask16 mask_2 = _mm512_cmplt_ps_mask(v_B, load_2);
+        __mmask16 mask_3 = _mm512_cmplt_ps_mask(v_B, load_3);
+        __mmask16 mask_4 = _mm512_cmplt_ps_mask(v_B, load_4);
+        __m512 v_one = _mm512_set1_ps(1.0);
+        __m512 v_A_1 = _mm512_setzero_ps();
+        __m512 v_A_2 = _mm512_setzero_ps();
+        __m512 v_A_3 = _mm512_setzero_ps();
+        __m512 v_A_4 = _mm512_setzero_ps();
+        v_A_1 = _mm512_mask_mov_ps(v_A_1, mask_1, v_one); 
+        v_A_2 = _mm512_mask_mov_ps(v_A_2, mask_2, v_one); 
+        v_A_3 = _mm512_mask_mov_ps(v_A_3, mask_3, v_one); 
+        v_A_4 = _mm512_mask_mov_ps(v_A_4, mask_4, v_one); 
+        _mm512_extstore_ps((float *)(A + 64*n),        v_A_1, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+        _mm512_extstore_ps((float *)(A + 64*n + 16),   v_A_2, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+        _mm512_extstore_ps((float *)(A + 64*n + 32),   v_A_3, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+        _mm512_extstore_ps((float *)(A + 64*n + 48),   v_A_4, _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+#endif
+    }
+    if(A[N_aligned : N_remaining] > B) A[N_aligned : N_remaining] = 1.f; else A[N_aligned : N_remaining] = 0.f;
+        //for (n = N_aligned; n < N; n++){
+        //    if (A[n] > B) A[n] = 1.f;
+        //    else A[n] = 0.f;
+        //}
+
         // int n;
         // #pragma omp parallel for private(n) shared(B)
         // for (n = 0; n < N; n++){
@@ -1124,25 +1192,18 @@ float *elementwise_or(int N, float *restrict A, float *restrict B){
     return S;
 }
 
-float *labels_to_vectors(int N, int K, float *restrict A){
-    float *restrict S = allocate_host(N*K);
-
+float *labels_to_vectors(int N, int K, float *restrict A, float *restrict targets){
     #pragma offload target(mic:MIC_DEV) \ 
     in(A:length(0) REUSE) \
-    nocopy(S:length(N*K) ALLOC)
+    in(targets:length(0) REUSE)
     {   
     
         int n;
-        #pragma omp parallel for private(n)
-        for (n = 0; n < K*N; n++)
-          S[n] = 0;
-
-    
+        
         #pragma omp parallel for private(n)
         for (n = 0; n < N; n++)
-          S[n*K + (int) A[n]] = 1;
+          targets[n*K + (int) A[n]] = 1.f;
     }
-    return S;
 }
 
 void lg(int N, float *restrict A){
@@ -1438,6 +1499,105 @@ void update(int a1, int a2, int a3, int a4, int a5, int a6, float *A, int b1, in
             //     A[i1i2i3*a4a5a6 : a4a5a6] += ALPHA * B[i1i2i3*a4a5a6 : a4a5a6];
             // }
         }
+        else if (b1 == 1 & b2 == 1 & b3 == 1 && b4 == 1 && b5 == 1 && a6 == b6){
+            int N = a6; 
+            int K = a1*a2*a3*a4*a5;
+            int a, n;
+            int num_cache_lines_64 = N/64;
+            int N_aligned = N/64*64;
+            int N_remaining = N - N_aligned;   
+            
+            #pragma omp parallel for private(n, a) shared(N, K, N_aligned, num_cache_lines_64)
+            // for (n = 0; n < num_cache_lines_64; n++)
+            for (n = 0; n < N_aligned; n += 64)
+            {
+                #ifdef __MIC__
+                float *B_pointer = B + n;
+                __m512 v_alpha = _mm512_set1_ps(ALPHA);
+                __m512 B_load_1 = _mm512_extload_ps(B_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 B_load_2 = _mm512_extload_ps(B_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 B_load_3 = _mm512_extload_ps(B_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 B_load_4 = _mm512_extload_ps(B_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 B_out_1 = _mm512_mul_ps(B_load_1, v_alpha);
+                __m512 B_out_2 = _mm512_mul_ps(B_load_2, v_alpha);
+                __m512 B_out_3 = _mm512_mul_ps(B_load_3, v_alpha);
+                __m512 B_out_4 = _mm512_mul_ps(B_load_4, v_alpha);
+                
+                for (a = 0; a < K; a++){
+                    float *A_pointer = A + a*N + n;
+    
+                    __m512 A_load_1 = _mm512_extload_ps(A_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                    __m512 A_load_2 = _mm512_extload_ps(A_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                    __m512 A_load_3 = _mm512_extload_ps(A_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                    __m512 A_load_4 = _mm512_extload_ps(A_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                    _mm512_extstore_ps((float *)(A_pointer),        _mm512_add_ps(A_load_1, B_out_1), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                    _mm512_extstore_ps((float *)(A_pointer + 16),   _mm512_add_ps(A_load_2, B_out_2), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                    _mm512_extstore_ps((float *)(A_pointer + 32),   _mm512_add_ps(A_load_3, B_out_3), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                    _mm512_extstore_ps((float *)(A_pointer + 48),   _mm512_add_ps(A_load_4, B_out_4), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                }
+                #endif
+            }
+            #pragma omp parallel for private(n, a) shared(N, N_aligned, N_remaining)
+            for (a = 0; a < K; a++){
+                for (n = N_aligned; n < N_aligned + N_remaining; n++){
+                    A[a*N + N_aligned : N_remaining] += ALPHA * B[N_aligned : N_remaining];
+                }    
+            }
+            
+            // A[N_aligned : N_remaining] += ALPHA*B[N_aligned : N_remaining];
+
+            // int a4a5a6 = a4*a5*a6;
+            // #pragma omp parallel for shared(a4a5a6)
+            // for (int i1i2i3 = 0; i1i2i3 < a1*a2*a3; i1i2i3++){
+            //     A[i1i2i3*a4a5a6 : a4a5a6] += ALPHA * B[i1i2i3*a4a5a6 : a4a5a6];
+            // }
+        }
+
+        else if (b1 == 1 & b2 == 1 & b3 == 1 && a4 == b4 && a5 == b5 && a6 == b6){
+            int N = a4*a5*a6; 
+            int K = a1*a2*a3;
+            int a, n;
+            int num_cache_lines_64 = N/64;
+            int N_aligned = N/64*64;
+            int N_remaining = N - N_aligned;   
+            
+            #pragma omp parallel for private(n, a) shared(N, K, N_aligned, num_cache_lines_64)
+            // for (n = 0; n < num_cache_lines_64; n++)
+            for (n = 0; n < N_aligned; n += 64)
+            {
+                #ifdef __MIC__
+                float *B_pointer = B + n;
+                __m512 v_alpha = _mm512_set1_ps(ALPHA);
+                __m512 B_load_1 = _mm512_extload_ps(B_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 B_load_2 = _mm512_extload_ps(B_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 B_load_3 = _mm512_extload_ps(B_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 B_load_4 = _mm512_extload_ps(B_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                __m512 B_out_1 = _mm512_mul_ps(B_load_1, v_alpha);
+                __m512 B_out_2 = _mm512_mul_ps(B_load_2, v_alpha);
+                __m512 B_out_3 = _mm512_mul_ps(B_load_3, v_alpha);
+                __m512 B_out_4 = _mm512_mul_ps(B_load_4, v_alpha);
+                
+                for (a = 0; a < K; a++){
+                    float *A_pointer = A + a*N + n;
+    
+                    __m512 A_load_1 = _mm512_extload_ps(A_pointer, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                    __m512 A_load_2 = _mm512_extload_ps(A_pointer + 16, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                    __m512 A_load_3 = _mm512_extload_ps(A_pointer + 32, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                    __m512 A_load_4 = _mm512_extload_ps(A_pointer + 48, _MM_UPCONV_PS_NONE, _MM_BROADCAST32_NONE, _MM_HINT_NONE); 
+                    _mm512_extstore_ps((float *)(A_pointer),        _mm512_add_ps(A_load_1, B_out_1), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                    _mm512_extstore_ps((float *)(A_pointer + 16),   _mm512_add_ps(A_load_2, B_out_2), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                    _mm512_extstore_ps((float *)(A_pointer + 32),   _mm512_add_ps(A_load_3, B_out_3), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                    _mm512_extstore_ps((float *)(A_pointer + 48),   _mm512_add_ps(A_load_4, B_out_4), _MM_DOWNCONV_PS_NONE, _MM_HINT_NONE);
+                }
+                #endif
+            }
+            #pragma omp parallel for private(n, a) shared(N, N_aligned, N_remaining)
+            for (a = 0; a < K; a++){
+                for (n = N_aligned; n < N_aligned + N_remaining; n++){
+                    A[a*N + N_aligned : N_remaining] += ALPHA * B[N_aligned : N_remaining];
+                }    
+            }
+        }
 
         else{
             float (*restrict A_6D)[a2][a3][a4][a5][a6] = (float (*)[a2][a3][a4][a5][a6]) A;
@@ -1643,8 +1803,8 @@ void apply_dropout(int N, int K, float *restrict A, int *restrict MASK){
         #pragma omp parallel for private(n, k)
         for (n = 0; n < N; n++){
             for (k = 0; k < K; k++){
-                // A[n*K + k] *= ((float) MASK[k]);      
-                A[n*K + k] *= ((float) MASK[n*K + k]);      
+                A[n*K + k] *= ((float) MASK[k]);      
+                // A[n*K + k] *= ((float) MASK[n*K + k]);      
             }
         } 
     }
@@ -1744,7 +1904,7 @@ float *sum_axis(int ROWS_A, int COLS_A, float *restrict A, int AXIS){
             _mm_free(Y);
         }
     }
-    else if (AXIS == 1){
+    else if (AXIS == 1){ // broadcasting sum along axis 1
         S = allocate_host(ROWS_A);
 
         #pragma offload target(mic:MIC_DEV) \ 
@@ -1802,10 +1962,14 @@ float *sum_axis_replace(int ROWS_A, int COLS_A, float *restrict A, int AXIS, flo
         in(A:length(0) REUSE) \
         in(S:length(0) REUSE)
         {   
-            float *restrict Y = ones_mic(COLS_A);
-            dot_mic(ROWS_A, COLS_A, A, 1, Y, S);
-            // free(Y);
-            _mm_free(Y);
+            // float *restrict Y = ones_mic(COLS_A);
+            // dot_mic(ROWS_A, COLS_A, A, 1, Y, S);
+            // // free(Y);
+            // _mm_free(Y);
+
+            int row, col;            
+            #pragma omp parallel for private(row, col) shared(ROWS_A, COLS_A)
+            for (row = 0; row < ROWS_A; row++) S[row] = __sec_reduce_add(A[row*COLS_A : COLS_A]);
         }
     }
     else if (AXIS == 2){ 
