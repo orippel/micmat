@@ -63,8 +63,8 @@ cdef class MICMat:
 
         else:
             if type(args[0]) == tuple:
-                shape = args[0]
-                self.allocate_host(shape)
+                self.shape = tuple([int(v) for v in args[0]])
+                self.allocate_host(self.shape)
 
             elif type(args[0]) == np.ndarray:
                 B = args[0]
@@ -227,7 +227,7 @@ cdef class MICMat:
 
         elif name == 'size':
             #return self.ROWS*self.COLS
-            return np.prod(self.shape)
+            return int(np.prod(self.shape)) if self.shape is not None else None
 
         elif name == 'ndim':
             return len(self.shape)
@@ -251,7 +251,7 @@ cdef class MICMat:
             #global memory_used_host
             #memory_used_host += np.product(self.shape) - self.size
 
-            self.shape = value
+            self.shape = tuple([int(v) for v in value])
 
             
 
@@ -276,16 +276,22 @@ cdef class MICMat:
             raise NameError('Cannot set attribute \'' + name + '\'.')
 
     @profile_routine
-    def astype(self, dtype):
+    def astype(self, dtype, *args):
+        cdef MICMat output
         # we assume that there are only 2 data types... float and int
+        if not args:
+            if dtype == 'float':
+                self.A = cmicmat.cast_float(self.size, self.A_int, self.offloaded)
+                self.dtype = 0
 
-        if dtype == 'float':
-            self.A = cmicmat.cast_float(self.size, self.A_int, self.offloaded)
-            self.dtype = 0
-
-        elif dtype == 'int':
-            self.A_int = cmicmat.cast_int(self.size, self.A, self.offloaded)
-            self.dtype = 1
+            elif dtype == 'int':
+                self.A_int = cmicmat.cast_int(self.size, self.A, self.offloaded)
+                self.dtype = 1
+        
+        else:
+            output = args[0]
+            if dtype == 'int':
+                cmicmat.cast_int_replace(self.size, self.A, output.A_int, self.offloaded)
 
         return self
 
@@ -505,15 +511,49 @@ cdef class MICMat:
         return self
 
     @profile_routine
-    def fill_uniform(self, RandGen stream):
+    def fill_uniform(self, float p, RandGen stream):
         cmicmat.fill_uniform(stream.skip_num, self.size, self.A)
+        self.scale(p)
         stream.skip_num = stream.skip_num + self.size
         return self
 
     @profile_routine
-    def fill_bernoulli(self, RandGen stream, float p):
-        cmicmat.fill_bernoulli(stream.skip_num, self.size, self.A_int, p)
+    def get_dropout_from_cached_uniform(self, MICMat cached_uniform, float p, MICMat scratch):
+        assert cached_uniform.size - self.size - 1 >= 0, 'There exists an array larger than the cached uniform.'
+        # ind_start = np.random.randint(cached_uniform.size - self.size - 1)
+        ind_start = int(64*(np.random.randint((cached_uniform.size - self.size - 1)/64)))
+
+        cmicmat.replace_partial_mic(scratch.size, 0, scratch.A, scratch.size, ind_start, cached_uniform.A)        
+
+        # convert uniform to Bernoulli, copy to self
+        scratch += p
+        scratch.astype('int', self)
+        
+        return self
+
+    @profile_routine
+    def fill_uniform_int_diverse(self, shift, MICMat scalings, RandGen stream, MICMat scratch):
+        cmicmat.fill_uniform(stream.skip_num, scratch.size, scratch.A)
         stream.skip_num = stream.skip_num + self.size
+
+        scratch.multiply(scalings)
+        scratch.update(scalings, -0.5)
+        scratch.update(float(shift))
+        scratch.floor()
+
+        scratch.astype('int', self)
+
+        return self
+
+    @profile_routine
+    def fill_bernoulli(self, RandGen stream, float p, **kwargs):
+        cdef int shift_const = kwargs.pop('shift', self.size)
+        
+        if shift_const < self.size:
+            cmicmat.shift_int(self.size - shift_const, shift_const, self.A_int)
+
+        cmicmat.fill_bernoulli(stream.skip_num, shift_const, self.A_int, p)
+        stream.skip_num = stream.skip_num + shift_const
         return self
 
     @profile_routine
@@ -699,6 +739,11 @@ cdef class MICMat:
         return self
     
     @profile_routine
+    def neg(self):
+        cmicmat.scale(self.size, self.A, -1.0)
+        return self
+
+    @profile_routine
     def scale(self, float c):
         cmicmat.scale(self.size, self.A, c)
         return self
@@ -711,6 +756,37 @@ cdef class MICMat:
     @profile_routine
     def invert(self):
         cmicmat.invert(self.size, self.A)
+        return self
+
+    # @profile_routine
+    # def shift(self, int shift, direction):
+    #     # void replace_partial_host(int N_A, int SHIFT_A, float *restrict A, int N_B, int SHIFT_B, float *restrict B){
+
+    # # A[SHIFT_A: N_B] = B[SHIFT_B : N_B];
+    #     if direction == 'forward':
+    #         remaining_size = self.size - shift
+    #         if self.dtype == 1:
+            
+    #         else:
+    #         cmicmat.replace_partial_host(remaining_size, shift, self.A, remaining_size, 0, self.A)
+
+    #     else:
+    #         raise NameError('Not implemented for other shift forms.')
+
+    #     return self
+
+    @profile_routine
+    def frac_nan(self):
+        cdef float f = cmicmat.frac_nan(self.size, self.A)
+        return f
+
+    @profile_routine
+    def treat_nan(self):
+        cdef float f = self.frac_nan()
+        if f > 0.:
+            print 'WARNING: ignoring ' + `f` + ' fraction of NaN elements.'
+            cmicmat.treat_nan(self.size, self.A)
+
         return self
     
     @profile_routine
@@ -731,6 +807,13 @@ cdef class MICMat:
         assert should_flip.size == N, 'Need should_flip size to be exactly ' + `N` + ', the size of the given tensor.'
         
         cmicmat.horizontal_reflection(N, C, H, W, self.A, should_flip.A_int, scratch.A)
+
+    @profile_routine
+    def vertical_reflection(self, MICMat should_flip, MICMat scratch):
+        N, C, H, W = self.shape[0], self.shape[1], self.shape[2], self.shape[3]
+        assert should_flip.size == N, 'Need should_flip size to be exactly ' + `N` + ', the size of the given tensor.'
+        
+        cmicmat.vertical_reflection(N, C, H, W, self.A, should_flip.A_int, scratch.A)
     
     @profile_routine
     def crop(self, MICMat crop_info, int output_H, int output_W, MICMat outputs):
@@ -739,7 +822,58 @@ cdef class MICMat:
         assert outputs.shape == (N, C, output_H, output_W), 'Need output shape to be exactly ' + `(N, C, output_H, output_W)` + '.'
 
         cmicmat.crop(N, C, H, W, output_H, output_W, self.A, crop_info.A_int, outputs.A, self.offloaded)
+
+    @profile_routine
+    def rgb_to_hsv(self, MICMat outputs, MICMat scratch):
+        N, C, H, W = self.shape[0], self.shape[1], self.shape[2], self.shape[3]
+        assert C == 3, 'Need inputs to be in RGB tensor format.'
+        assert outputs.shape == (N, C, H, W), 'Need output shape to be exactly ' + `(N, C, H, W)` + '.'
+
+        cmicmat.rgb_to_hsv(N, H, W, self.A, outputs.A, scratch.A, self.offloaded)
+
+    @profile_routine
+    def hsv_to_rgb(self, MICMat outputs, MICMat scratch):
+        N, C, H, W = self.shape[0], self.shape[1], self.shape[2], self.shape[3]
+        assert C == 3, 'Need inputs to be in HSV tensor format.'
+        assert outputs.shape == (N, C, H, W), 'Need output shape to be exactly ' + `(N, C, H, W)` + '.'
+
+        cmicmat.hsv_to_rgb(N, H, W, self.A, outputs.A, scratch.A, self.offloaded)
     
+    @profile_routine
+    def perturb_hue(self, MICMat perturbations):
+        N, C, H, W = self.shape
+        assert C == 3, 'Input must be in image tensor format.'
+        assert perturbations.size == N, 'Need exactly one perturbation element per input image.'
+
+        cmicmat.perturb_hue(N, C, H, W, self.A, perturbations.A, self.offloaded)
+
+        return self
+
+    @profile_routine
+    def perturb_saturation(self, MICMat scale_perturbations, MICMat shift_perturbations):
+        N, C, H, W = self.shape
+        assert scale_perturbations.size == N, 'Need exactly one perturbation element per input image.'
+        assert shift_perturbations.size == N, 'Need exactly one perturbation element per input image.'
+        cmicmat.perturb_saturation(N, C, H, W, self.A, scale_perturbations.A, shift_perturbations.A, self.offloaded)
+
+        return self
+
+    @profile_routine
+    def perturb_value(self, MICMat scale_perturbations, MICMat shift_perturbations):
+        N, C, H, W = self.shape
+        assert scale_perturbations.size == N, 'Need exactly one perturbation element per input image.'
+        assert shift_perturbations.size == N, 'Need exactly one perturbation element per input image.'
+
+        if C == 1:
+            self.scale(1.0/255.0)
+
+        cmicmat.perturb_value(N, C, H, W, self.A, scale_perturbations.A, shift_perturbations.A, self.offloaded)
+
+        if C == 1:
+            self.scale(255.0)
+
+        return self
+
     @profile_routine
     def response_normalization(self, MICMat inputs, float alpha, float beta, int local_radius):
         N, K, H, W = inputs.shape
@@ -794,6 +928,9 @@ cdef class MICMat:
             elif self.dtype == 1:
                 cmicmat.interleave_block_int(N, C, block, self.A_int, output.A) 
 
+        else:
+            cmicmat.replace_mic(self.size, output.A, self.A)
+
         cdef MICMat reshaped_object
         reshaped_object = output if self.dtype == 0 else self
 
@@ -829,8 +966,8 @@ cdef class MICMat:
     def interleave_for_gradient(self, int block, MICMat output):
         N, C, H, W = self.shape
         
-        if block > 1:
-            cmicmat.interleave_for_gradient(N, C, H, W, block, self.A, output.A)
+        # if block > 1:
+        cmicmat.interleave_for_gradient(N, C, H, W, block, self.A, output.A)
 
         output.shape = (N, C/block, H, W, block)
 
@@ -842,8 +979,8 @@ cdef class MICMat:
 
         C = C_block * block
         
-        if block > 1:
-            cmicmat.uninterleave_for_gradient(N, C, H, W, block, self.A, output.A)
+        # if block > 1:
+        cmicmat.uninterleave_for_gradient(N, C, H, W, block, self.A, output.A)
 
         output.shape = (N, C, H, W)
         
@@ -854,6 +991,48 @@ cdef class MICMat:
 
     #     inputs.rotate_dimensions('forward', inputs_rotated)
     #     inputs_rotated.interleave_block(layer['N block'], inputs_interleaved)
+
+    @profile_routine
+    def global_averaging(self, MICMat outputs):
+        original_shape = self.shape
+        assert self.ndim == 4, 'This routine only applies to standard 4D tensors.'
+        assert outputs.shape == self.shape[:2]
+        N, K, H, W = self.shape
+        
+        self.shape = (N*K, H*W)
+        outputs.shape = (N*K, 1)
+        
+        outputs.sum_replace(self, 1)
+        outputs.scale(1./(H*W))
+        # print 'forward'
+        # print self.abs_mean()
+        # print outputs.abs_mean()
+        self.shape = original_shape
+        outputs.shape = original_shape[:2]
+        
+        return outputs
+
+    @profile_routine
+    def global_averaging_gradient(self, MICMat gradient_outputs):
+        # self is gradient_inputs
+        original_shape = self.shape
+        assert self.ndim == 4, 'This routine only applies to standard 4D tensors.'
+        assert gradient_outputs.shape == self.shape[:2]
+        N, K, H, W = self.shape
+
+        self.shape = (N*K, H*W)
+        gradient_outputs.shape = (N*K, 1)
+        # self.fill_zeros()
+        self.update(gradient_outputs)
+        self.scale(1./(H*W))
+
+        self.shape = original_shape
+        gradient_outputs.shape = original_shape[:2]
+        
+        # print 'backward'
+        # print self.abs_mean()
+        # print gradient_outputs.abs_mean()
+        return self
 
     @profile_routine
     def convolution(self, MICMat inputs, MICMat filters, MICMat argmaxs, int stride, int padding, int pooling_radius, int pooling_stride, layer, argmaxs_fixed, MICMat scratch):
@@ -1120,6 +1299,20 @@ cdef class MICMat:
         return spatials
 
     @profile_routine
+    def low_pass_filter(self, MICMat outputs, int H_out, int W_out):
+        # assert 2*(outputs.shape[-2]/2) == outputs.shape[-2], 'Low-pass diameter must be even.'
+        outputs.fill_zeros()
+        cmicmat.low_pass_filter(np.product(self.shape[:-2]), self.shape[-2], self.shape[-1]/2, H_out, W_out, self.A, outputs.A)
+
+        return self
+
+    @profile_routine
+    def low_pass_filter_gradient(self, MICMat gradient_outputs, int H_out, int W_out):
+        cmicmat.low_pass_filter_gradient(np.product(self.shape[:-2]), self.shape[-2], self.shape[-1]/2, H_out, W_out, self.A, gradient_outputs.A)
+
+        return self
+
+    @profile_routine
     def wipe_out_irrelevant_entries(self):
         cmicmat.wipe_out_irrelevant_entries(np.product(self.shape[:-2]), self.shape[-2], self.shape[-1]/2, self.A)
 
@@ -1132,9 +1325,10 @@ cdef class MICMat:
         return self
 
     @profile_routine
-    def fft_conjugate_symmetry_scaling(self, spatial_W, MICMat scratch):
+    def fft_conjugate_symmetry_scaling(self, spatial_W, MICMat scratch, **kwargs):
         N, K, H = self.shape[:-1]
-        cmicmat.fft_conjugate_symmetry_scaling(N, K, H, spatial_W, self.A, scratch.A)
+        cdef int forward = kwargs.pop('forward', 1)
+        cmicmat.fft_conjugate_symmetry_scaling(N, K, H, forward, spatial_W, self.A, scratch.A)
 
         return self
 
@@ -1466,7 +1660,9 @@ cdef class MICMat:
 
         if type(V) == MICMat:
             V_MICMat = V
-            assert self.ndim == V_MICMat.ndim, 'Dimensions ' + `self.ndim` + ' and ' + `V_MICMat.ndim` + ' of MICMats do not match in update.'
+            if V_MICMat.size > 1:
+                assert self.ndim == V_MICMat.ndim, 'Dimensions ' + `self.ndim` + ' and ' + `V_MICMat.ndim` + ' of MICMats do not match in update.'
+
             a1, a2, a3, a4, a5, a6 = tuple([1]*(6 - len(self.shape))) + self.shape
             b1, b2, b3, b4, b5, b6  = tuple([1]*(6 - len(V_MICMat.shape))) + V_MICMat.shape
             assert (b1 == a1 or b1 == 1) and (b2 == a2 or b2 == 1) and (b3 == a3 or b3 == 1) and (b4 == a4 or b4 == 1) and (b5 == a5 or b5 == 1) and (b6 == a6 or b6 == 1), 'Matrix dimensions ' + `self.shape` + ' and ' + `V_MICMat.shape` + ' don\'t match in update.'
@@ -1474,7 +1670,7 @@ cdef class MICMat:
 
             cmicmat.update(a1, a2, a3, a4, a5, a6, self.A, b1, b2, b3, b4, b5, b6, V_MICMat.A, ALPHA, self.offloaded)
 
-        elif type(V) == np.float32 or type(V) == np.float64 or type(V) == float:
+        elif type(V) in {np.float32, np.float64, float}:
             if type(V) == np.float64:
                 V = V.astype(np.float32)
             cmicmat.update_const(self.size, self.A, ALPHA*V)
@@ -1560,23 +1756,30 @@ cdef class MICMat:
 
     @profile_routine
     def sum(self, *args):         
-        cdef MICMat S = MICMat()
+        cdef MICMat S_MICMat = MICMat()
         cdef int AXIS = 2
 
-        if not args or args[0] == 2:
-            S.shape = (1, 1)
-            S.A = cmicmat.sum_axis(self.size, 1, self.A, AXIS)
-        else:
+        # if not args or args[0] == 2:
+        #     S_MICMat.shape = (1, 1)
+        #     S_MICMat.A = cmicmat.sum_axis(self.size, 1, self.A, AXIS)
+        # else:
+        if not not args:
             AXIS = args[0]
-            if AXIS == 0:
-                S.shape = (1, self.COLS)
 
-            if AXIS == 1:
-                S.shape = (self.ROWS, 1)
-            
-            S.A = cmicmat.sum_axis(self.ROWS, self.COLS, self.A, AXIS)    
+        if AXIS == 0:
+            S_MICMat.shape = (1, self.COLS)
+
+        if AXIS == 1:
+            S_MICMat.shape = (self.ROWS, 1)
         
-        S.offloaded = self.offloaded
+        if AXIS == 2:
+            S = cmicmat.sumo(self.size, self.A)
+
+        else:
+            S_MICMat.A = cmicmat.sum_axis(self.ROWS, self.COLS, self.A, AXIS)
+            S_MICMat.offloaded = self.offloaded
+            S = S_MICMat
+
         return S
 
     @profile_routine
@@ -1643,6 +1846,9 @@ cdef class MICMat:
         if self.ndim == 2:
             I.A_int = cmicmat.max_axis(self.ROWS, self.COLS, self.A, AXIS)
 
+        elif self.ndim == 4 and AXIS == 2:
+            I.A_int = cmicmat.max_axis(self.size, 1, self.A, AXIS)
+
         else:
             raise NameError('Currently cannot compute max/min for tensor.')
             # assert AXIS == 2
@@ -1699,6 +1905,19 @@ cdef class MICMat:
         return S
 
     @profile_routine
+    def max_elementwise_replace(self, MICMat A, MICMat B):
+        self.fill_zeros()
+        self += A
+        self -= B
+        self.abs() # self = |A - B|
+
+        self += A
+        self += B # self = |A - B| + A + B
+
+        self.scale(0.5)
+        return self
+
+    @profile_routine
     def max_replace(self, MICMat S, *args):
         cdef int AXIS = 2
 
@@ -1713,7 +1932,7 @@ cdef class MICMat:
             if AXIS == 1:
                 assert self.shape == (S.ROWS, 1), 'MICMat shape must be ' + `(S.ROWS, 1)` + '.'
 
-            cmicmat.max_axis_replace(self.ROWS, self.COLS, S.A, AXIS, self.A)
+            cmicmat.max_axis_replace(S.ROWS, S.COLS, S.A, AXIS, self.A)
 
         return self
 
@@ -1742,9 +1961,12 @@ cdef class MICMat:
     def mean(self, *args):
         cdef int AXIS = 2 
         cdef float SCALING
+        cdef MICMat S_MICMat
 
         if not args or args[0] == 2:
             SCALING = 1.0/(<float> self.size)
+            S = self.sum(AXIS)
+            S *= SCALING
         else:
             AXIS = args[0]
             if AXIS == 0:
@@ -1753,15 +1975,16 @@ cdef class MICMat:
             if AXIS == 1:
                 SCALING = 1.0/(<float> self.COLS)
 
-        
-        cdef MICMat S = self.sum(AXIS)
-        S.offloaded = self.offloaded
-        S.scale(SCALING)
+            S_MICMat = self.sum(AXIS)        
+            S_MICMat.offloaded = self.offloaded
+            S_MICMat.scale(SCALING)
+            S = S_MICMat
+
         return S      
 
     @profile_routine
     def norm(self, *args):
-
+        cdef MICMat S_MICMat
         cdef int AXIS = 2 
         if not args:
             pass
@@ -1771,9 +1994,15 @@ cdef class MICMat:
         cdef MICMat B = self.deepcopy()
         B.pow(2.0)
 
-        cdef MICMat S = B.sum(AXIS)
-        S.offloaded = self.offloaded
-        S.sqrt()
+        if AXIS == 2:
+            S = B.sum(AXIS)
+        
+        else:
+            S_MICMat = B.sum(AXIS)
+            S_MICMat.offloaded = self.offloaded
+            S_MICMat.sqrt()
+            S = S_MICMat
+
         B.free()
         return S 
 
@@ -1810,6 +2039,9 @@ cdef class MICMat:
         S.offloaded = self.offloaded
         S.sqrt()
         return S
+
+    def abs_mean(self):
+        return self.deepcopy().abs().mean()
 
 
 ######### native Python operator implementations
@@ -1972,17 +2204,26 @@ cdef class MICMat:
             zeros.offload_mic()
 
         zeros.fill_zeros()
-        return (self == zeros).sum().float()/self.size
+        return (self == zeros).sum()/self.size
 
 
 cdef class Scratch(MICMat):
     cdef list shapes
     cdef list shifts
+    cdef int updated
     cdef MICMat end
 
     def __cinit__(self, *args):
         self.shapes = []
         self.shifts = [0]
+        self.updated = False
+
+    def __setattr__(self, name, value):
+        if name == 'end':
+            self.end = value
+
+        else:
+            MICMat.__setattr__(self, name, value)
 
     def __getattr__(self, name):
         if name == 'shapes':
@@ -1992,6 +2233,9 @@ cdef class Scratch(MICMat):
             return self.shifts[-1]
 
         elif name == 'end':
+            if not self.updated:
+                self.update_end()
+
             return self.end
 
         else:
@@ -2022,6 +2266,7 @@ cdef class Scratch(MICMat):
     def append(self, args, **kwargs):
         should_fill_zeros = kwargs.pop('fill_zeros', False)
         cdef MICMat V
+        self.updated = False
 
         if type(args) == MICMat:
             V = args
@@ -2051,13 +2296,7 @@ cdef class Scratch(MICMat):
 
     def update_end(self):
         self.end = self.get()
-
-    def __setattr__(self, name, value):
-        if name == 'end':
-            self.end = value
-
-        else:
-            MICMat.__setattr__(self, name, value)
+        self.updated = True
 
     @profile_routine
     def get(self, *args):

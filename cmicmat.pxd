@@ -78,6 +78,10 @@ cdef extern from "micmat.h":
 
     void sqrto(int N, float *A)
 
+    float frac_nan(int N, float *A)
+
+    void treat_nan(int N, float *A)
+
     void powo(int N, float *A, float b)
 
     float normo(int N, float *A)
@@ -89,6 +93,8 @@ cdef extern from "micmat.h":
     void copy(int N, float *A, float *B, int offloaded)
 
     void copy_int(int N, int *A, int *B, int offloaded)
+
+    void shift_int(int N, int shift, int *A)
 
     void replace_host(int N, float *A, float *B)
 
@@ -138,6 +144,8 @@ cdef extern from "micmat.h":
 
     int *cast_int(int N, float *A, int offloaded)
 
+    void cast_int_replace(int N, float *A, int *OUTPUT, int offloaded)
+
     void free_host(int N, float *A)
 
     void free_host_int(int N, int *A)
@@ -175,8 +183,16 @@ cdef extern from "micmat.h":
     void convolve(int N, int C, int H, int W, float *INPUTS, int K, int Y, int X, float *FILTERS, float *OUTPUTS, int tight)
 
     void horizontal_reflection(int N, int C, int H, int W, float *INPUTS, int *SHOULD_FLIP, float *scratch)
+    void vertical_reflection(int N, int C, int H, int W, float *INPUTS, int *SHOULD_FLIP, float *scratch)
 
     void crop(int N, int C, int H, int W, int output_W, int output_H, float *INPUTS, int *CROP_INFO, float *OUTPUTS, int offloaded)
+
+    void rgb_to_hsv(int N, int H, int W, float *INPUTS, float *OUTPUTS, float *SCRATCH, int offloaded)
+    void hsv_to_rgb(int N, int H, int W, float *INPUTS, float *OUTPUTS, float *SCRATCH, int offloaded)
+
+    void perturb_hue(int N, int C, int H, int W, float *INPUTS, float *PERTURBATIONS, int offloaded)
+    void perturb_saturation(int N, int C, int H, int W, float *INPUTS, float *SCALE_PERTURBATIONS, float *SHIFT_PERTURBATIONS, int offloaded)
+    void perturb_value(int N, int C, int H, int W, float *INPUTS, float *SCALE_PERTURBATIONS, float *SHIFT_PERTURBATIONS, int offloaded)
 
     void response_normalization(int N, int K, int H, int W, float *INPUTS, float *OUTPUTS, float ALPHA, float BETA, int local_radius)
 
@@ -263,9 +279,12 @@ cdef extern from "micmat.h":
 
     void cmult_gradient(int N, int K, int C, int HW, float *INPUTS, float *GRADIENT_INPUTS, float *FILTERS, float *GRADIENT_FILTERS, float *GRADIENT_OUTPUTS)
 
+    void low_pass_filter(int N, int H, int W, int DIAMETER_H, int DIAMETER_W, float *INPUTS, float *OUTPUTS)
+    void low_pass_filter_gradient(int N, int H, int W, int DIAMETER_H, int DIAMETER_W, float *INPUTS, float *OUTPUTS)
+
     void conjugate(int N, float *A)
 
-    void fft_conjugate_symmetry_scaling(int N, int K, int H, int W, float *A, float *scratch)
+    void fft_conjugate_symmetry_scaling(int N, int K, int H, int FORWARD, int W, float *A, float *scratch)
 
     void real_and_imaginary(int N, float *A, float *REAL, float *IMAGINARY)
 

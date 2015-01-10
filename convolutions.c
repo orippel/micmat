@@ -7937,63 +7937,164 @@ void fft(int N, int H, int W, int IS_FORWARD, float *restrict SPATIALS, float co
         in(SPATIALS:length(0) REUSE) \
         in(FREQUENCIES:length(0) REUSE)
     {
+        int NUM_THREADS = 128;
+        int N_THREAD = N/NUM_THREADS;
+        int N_ALIGNED = (N/NUM_THREADS) * NUM_THREADS;
+        int N_REMAINING = N - N_ALIGNED;
+        int thread;
 
-        DFTI_DESCRIPTOR_HANDLE hand; MKL_LONG status; 
+        #pragma omp parallel for \
+        private(thread) \
+        shared(N, H, W, IS_FORWARD, SPATIALS, FREQUENCIES, NUM_THREADS, N_THREAD)
+        for (thread = 0; thread < NUM_THREADS; thread++){
+            float *restrict spatials_pointer = SPATIALS + thread*N_THREAD*H*W;
+            float complex *restrict frequencies_pointer = FREQUENCIES + thread*N_THREAD*H*(W/2 + 1);
+
+            DFTI_DESCRIPTOR_HANDLE hand; MKL_LONG status; 
         
-        MKL_LONG transform_dimensions[] = {H, W};
-        MKL_LONG spatial_strides[] = {0, W, 1}; // spatial shape: HxW
-        MKL_LONG frequency_strides[] = {0, W/2 + 1, 1}; // frequency shape: H*(floor(W/2) + 1)
-        // printf("Starting.\n");
+            MKL_LONG transform_dimensions[] = {H, W};
+            MKL_LONG spatial_strides[] = {0, W, 1}; // spatial shape: HxW
+            MKL_LONG frequency_strides[] = {0, W/2 + 1, 1}; // frequency shape: H*(floor(W/2) + 1)
 
-        status = DftiCreateDescriptor(&hand, DFTI_SINGLE, DFTI_REAL, 2, transform_dimensions);
-        // printf("Create %d\n", status);
+            status = DftiCreateDescriptor(&hand, DFTI_SINGLE, DFTI_REAL, 2, transform_dimensions);
+            status = DftiSetValue(hand, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
+            float scale = pow((float) H*W, -0.5);
+            status = DftiSetValue(hand, DFTI_FORWARD_SCALE, scale);
+            status = DftiSetValue(hand, DFTI_BACKWARD_SCALE, scale);
+            status = DftiSetValue(hand, DFTI_NUMBER_OF_TRANSFORMS, N_THREAD);
+            status = DftiSetValue(hand, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX);
 
-        status = DftiSetValue(hand, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-        // printf("place %d\n", status);
-        float scale = pow((float) H*W, -0.5);
-        status = DftiSetValue(hand, DFTI_FORWARD_SCALE, scale);
-        // printf("forward %d\n", status);
-        status = DftiSetValue(hand, DFTI_BACKWARD_SCALE, scale);
-        // printf("backward %d\n", status);
-        status = DftiSetValue(hand, DFTI_NUMBER_OF_TRANSFORMS, N);
-        // printf("num %d\n", status);
+            if (IS_FORWARD == 1){
+                status = DftiSetValue(hand, DFTI_INPUT_STRIDES, spatial_strides);
+                status = DftiSetValue(hand, DFTI_OUTPUT_STRIDES, frequency_strides);
+                
+                status = DftiSetValue(hand, DFTI_INPUT_DISTANCE, H*W);
+                status = DftiSetValue(hand, DFTI_OUTPUT_DISTANCE, H*(W/2 + 1));
+            }
+            else{
+                status = DftiSetValue(hand, DFTI_INPUT_STRIDES, frequency_strides);
+                status = DftiSetValue(hand, DFTI_OUTPUT_STRIDES, spatial_strides);
 
-        status = DftiSetValue(hand, DFTI_THREAD_LIMIT, 236);
+                status = DftiSetValue(hand, DFTI_INPUT_DISTANCE, H*(W/2 + 1));
+                status = DftiSetValue(hand, DFTI_OUTPUT_DISTANCE, H*W);
+            }
 
-        status = DftiSetValue(hand, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX);
-        // printf("storage %d\n", status);
+            status = DftiCommitDescriptor(hand);
 
-        if (IS_FORWARD == 1){
-            status = DftiSetValue(hand, DFTI_INPUT_STRIDES, spatial_strides);
-            // printf("in strides %d\n", status);
-            status = DftiSetValue(hand, DFTI_OUTPUT_STRIDES, frequency_strides);
-            // printf("out strides %d\n", status);
-
-            status = DftiSetValue(hand, DFTI_INPUT_DISTANCE, H*W);
-            // printf("input %d\n", status);
-            status = DftiSetValue(hand, DFTI_OUTPUT_DISTANCE, H*(W/2 + 1));
-            // printf("output %d\n", status);
+            if (IS_FORWARD == 1) status = DftiComputeForward(hand, spatials_pointer, frequencies_pointer);
+            else              status = DftiComputeBackward(hand, frequencies_pointer, spatials_pointer);
+            
+            status = DftiFreeDescriptor(&hand);
         }
-        else{
-            status = DftiSetValue(hand, DFTI_INPUT_STRIDES, frequency_strides);
-            status = DftiSetValue(hand, DFTI_OUTPUT_STRIDES, spatial_strides);
-
-            status = DftiSetValue(hand, DFTI_INPUT_DISTANCE, H*(W/2 + 1));
-            status = DftiSetValue(hand, DFTI_OUTPUT_DISTANCE, H*W);
-        }
-
-        status = DftiCommitDescriptor(hand);
-
-        // printf("commit %d\n", status);
-        if (IS_FORWARD == 1) status = DftiComputeForward(hand, SPATIALS, FREQUENCIES);
-        else              status = DftiComputeBackward(hand, FREQUENCIES, SPATIALS);
         
-        // printf("fft %d\n", status);
-        status = DftiFreeDescriptor(&hand);
-        // printf("free %d\n", status);
+
+        // transform remaining ones
+        if (N_REMAINING > 0){
+            float *restrict spatials_pointer = SPATIALS + N_ALIGNED*H*W;
+            float complex *restrict frequencies_pointer = FREQUENCIES + N_ALIGNED*H*(W/2 + 1);
+
+            DFTI_DESCRIPTOR_HANDLE hand; MKL_LONG status; 
+        
+            MKL_LONG transform_dimensions[] = {H, W};
+            MKL_LONG spatial_strides[] = {0, W, 1}; // spatial shape: HxW
+            MKL_LONG frequency_strides[] = {0, W/2 + 1, 1}; // frequency shape: H*(floor(W/2) + 1)
+
+            status = DftiCreateDescriptor(&hand, DFTI_SINGLE, DFTI_REAL, 2, transform_dimensions);
+            status = DftiSetValue(hand, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
+            float scale = pow((float) H*W, -0.5);
+            status = DftiSetValue(hand, DFTI_FORWARD_SCALE, scale);
+            status = DftiSetValue(hand, DFTI_BACKWARD_SCALE, scale);
+            status = DftiSetValue(hand, DFTI_NUMBER_OF_TRANSFORMS, N_REMAINING);
+            status = DftiSetValue(hand, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX);
+
+            if (IS_FORWARD == 1){
+                status = DftiSetValue(hand, DFTI_INPUT_STRIDES, spatial_strides);
+                status = DftiSetValue(hand, DFTI_OUTPUT_STRIDES, frequency_strides);
+                
+                status = DftiSetValue(hand, DFTI_INPUT_DISTANCE, H*W);
+                status = DftiSetValue(hand, DFTI_OUTPUT_DISTANCE, H*(W/2 + 1));
+            }
+            else{
+                status = DftiSetValue(hand, DFTI_INPUT_STRIDES, frequency_strides);
+                status = DftiSetValue(hand, DFTI_OUTPUT_STRIDES, spatial_strides);
+
+                status = DftiSetValue(hand, DFTI_INPUT_DISTANCE, H*(W/2 + 1));
+                status = DftiSetValue(hand, DFTI_OUTPUT_DISTANCE, H*W);
+            }
+
+            status = DftiCommitDescriptor(hand);
+
+            if (IS_FORWARD == 1) status = DftiComputeForward(hand, spatials_pointer, frequencies_pointer);
+            else              status = DftiComputeBackward(hand, frequencies_pointer, spatials_pointer);
+            
+            status = DftiFreeDescriptor(&hand);
+        }
 
     }
 }
+
+// void fft(int N, int H, int W, int IS_FORWARD, float *restrict SPATIALS, float complex *restrict FREQUENCIES){
+//     #pragma offload target(mic:MIC_DEV) \ 
+//         in(SPATIALS:length(0) REUSE) \
+//         in(FREQUENCIES:length(0) REUSE)
+//     {
+
+//         DFTI_DESCRIPTOR_HANDLE hand; MKL_LONG status; 
+        
+//         MKL_LONG transform_dimensions[] = {H, W};
+//         MKL_LONG spatial_strides[] = {0, W, 1}; // spatial shape: HxW
+//         MKL_LONG frequency_strides[] = {0, W/2 + 1, 1}; // frequency shape: H*(floor(W/2) + 1)
+//         // printf("Starting.\n");
+
+//         status = DftiCreateDescriptor(&hand, DFTI_SINGLE, DFTI_REAL, 2, transform_dimensions);
+//         // printf("Create %d\n", status);
+
+//         status = DftiSetValue(hand, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
+//         // printf("place %d\n", status);
+//         float scale = pow((float) H*W, -0.5);
+//         status = DftiSetValue(hand, DFTI_FORWARD_SCALE, scale);
+//         // printf("forward %d\n", status);
+//         status = DftiSetValue(hand, DFTI_BACKWARD_SCALE, scale);
+//         // printf("backward %d\n", status);
+//         status = DftiSetValue(hand, DFTI_NUMBER_OF_TRANSFORMS, N);
+//         // printf("num %d\n", status);
+
+//         status = DftiSetValue(hand, DFTI_THREAD_LIMIT, 236);
+
+//         status = DftiSetValue(hand, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX);
+//         // printf("storage %d\n", status);
+
+//         if (IS_FORWARD == 1){
+//             status = DftiSetValue(hand, DFTI_INPUT_STRIDES, spatial_strides);
+//             // printf("in strides %d\n", status);
+//             status = DftiSetValue(hand, DFTI_OUTPUT_STRIDES, frequency_strides);
+//             // printf("out strides %d\n", status);
+
+//             status = DftiSetValue(hand, DFTI_INPUT_DISTANCE, H*W);
+//             // printf("input %d\n", status);
+//             status = DftiSetValue(hand, DFTI_OUTPUT_DISTANCE, H*(W/2 + 1));
+//             // printf("output %d\n", status);
+//         }
+//         else{
+//             status = DftiSetValue(hand, DFTI_INPUT_STRIDES, frequency_strides);
+//             status = DftiSetValue(hand, DFTI_OUTPUT_STRIDES, spatial_strides);
+
+//             status = DftiSetValue(hand, DFTI_INPUT_DISTANCE, H*(W/2 + 1));
+//             status = DftiSetValue(hand, DFTI_OUTPUT_DISTANCE, H*W);
+//         }
+
+//         status = DftiCommitDescriptor(hand);
+
+//         // printf("commit %d\n", status);
+//         if (IS_FORWARD == 1) status = DftiComputeForward(hand, SPATIALS, FREQUENCIES);
+//         else              status = DftiComputeBackward(hand, FREQUENCIES, SPATIALS);
+        
+//         // printf("fft %d\n", status);
+//         status = DftiFreeDescriptor(&hand);
+//         // printf("free %d\n", status);
+
+//     }
+// }
 
 void fft_full(int N, int H, int W, int IS_FORWARD, float *restrict SPATIALS, float complex *restrict FREQUENCIES){
     #pragma offload target(mic:MIC_DEV) \ 
@@ -8080,6 +8181,7 @@ void cmult_gradient(int N, int K, int C, int HW, float complex *restrict INPUTS,
     {
         // int nk;
         int kc;
+        
         #pragma omp parallel for private(kc) shared(INPUTS, GRADIENT_INPUTS, FILTERS, GRADIENT_FILTERS, GRADIENT_OUTPUTS, N, K, C, HW)
         // for (nk = 0; nk < N*K; nk++){
         for (kc = 0; kc < K*C; kc++){
@@ -8087,12 +8189,73 @@ void cmult_gradient(int N, int K, int C, int HW, float complex *restrict INPUTS,
             int c = md(kc, C);
             assert(k*C + c == kc);
 
-            // GRADIENT_FILTERS[kc*HW : HW] = 0.f;
             for (int n = 0; n < N; n++){
                 // for (int hw = 0; hw < HW; hw++){
                 //     GRADIENT_FILTERS[ti3(k, c, hw, C, HW)] += GRADIENT_OUTPUTS[ti3(n, k, hw, K, HW)] * conjf(INPUTS[ti3(n, c, hw, C, HW)]);
                 // }
                 GRADIENT_FILTERS[kc*HW : HW] += GRADIENT_OUTPUTS[(n*K + k)*HW : HW] * conjf(INPUTS[(n*C + c)*HW : HW]);
+                
+                // probably PROBLEM WITH grad_inputs: grad_outputs is d/dReal, d/dImag and need to differentiate each individually
+                // GRADIENT_INPUTS[(n*C + c)*HW : HW] += GRADIENT_OUTPUTS[(n*K + k)*HW : HW] * conjf(FILTERS[kc*HW : HW]);
+
+            }
+        }
+
+        // int nc;
+        // // GRADIENT_INPUTS[0 : N*C*HW] = 0.f;
+        // #pragma omp parallel for private(nc) shared(INPUTS, GRADIENT_INPUTS, FILTERS, GRADIENT_FILTERS, GRADIENT_OUTPUTS, N, K, C, HW)
+        // // for (nk = 0; nk < N*K; nk++){
+        // for (nc = 0; nc < N*C; nc++){
+        //     int n = nc/C;
+        //     int c = md(nc, C);
+        //     assert(n*C + c == nc);
+
+        //     for (int k = 0; k < K; k++){
+        //         // for (int hw = 0; hw < HW; hw++){
+        //         //     GRADIENT_FILTERS[ti3(k, c, hw, C, HW)] += GRADIENT_OUTPUTS[ti3(n, k, hw, K, HW)] * conjf(INPUTS[ti3(n, c, hw, C, HW)]);
+        //         // }
+        //         // GRADIENT_FILTERS[kc*HW : HW] += GRADIENT_OUTPUTS[(n*K + k)*HW : HW] * conjf(INPUTS[(n*C + c)*HW : HW]);
+        //         GRADIENT_INPUTS[nc*HW : HW] += GRADIENT_OUTPUTS[(n*K + k)*HW : HW] * conjf(FILTERS[(k*C + c)*HW : HW]);
+        //     }
+        // }
+    }
+}
+
+void low_pass_filter(int N, int H, int W, int H_out, int W_out, float complex *restrict INPUTS, float complex *restrict OUTPUTS){
+    #pragma offload target(mic:MIC_DEV) \ 
+        in(INPUTS:length(0) REUSE) \ 
+        in(OUTPUTS:length(0) REUSE)
+    {
+        int n;
+        int W_freq = W_out/2 + 1;
+        #pragma omp parallel for private(n) shared(INPUTS, OUTPUTS, N, H, W, H_out, W_out, W_freq)
+        for (n = 0; n < N; n++){
+            for (int h = 0; h < H_out/2; h++){
+                OUTPUTS[ti3(n, h, 0, H_out, W_freq) : W_freq-1] = INPUTS[ti3(n, h, 0, H, W): W_freq-1];
+            }
+
+            for (int h = H_out/2 + 1; h < H_out; h++){
+                OUTPUTS[ti3(n, h, 1, H_out, W_freq) : W_freq-2] = INPUTS[ti3(n, H - (H_out - h), 1, H, W): W_freq-2];
+            }
+        }
+    }
+}
+
+void low_pass_filter_gradient(int N, int H, int W, int H_out, int W_out, float complex *restrict GRADIENT_INPUTS, float complex *restrict GRADIENT_OUTPUTS){
+    #pragma offload target(mic:MIC_DEV) \ 
+        in(GRADIENT_INPUTS:length(0) REUSE) \ 
+        in(GRADIENT_OUTPUTS:length(0) REUSE)
+    {
+        int n;
+        int W_freq = W_out/2 + 1;
+        #pragma omp parallel for private(n) shared(GRADIENT_INPUTS, GRADIENT_OUTPUTS, N, H, W, H_out, W_out, W_freq)
+        for (n = 0; n < N; n++){
+            for (int h = 0; h < H_out/2; h++){
+                GRADIENT_INPUTS[ti3(n, h, 0, H, W): W_freq-1] = GRADIENT_OUTPUTS[ti3(n, h, 0, H_out, W_freq) : W_freq-1];
+            }
+
+            for (int h = H_out/2 + 1; h < H_out; h++){
+                GRADIENT_INPUTS[ti3(n, H - (H_out - h), 1, H, W): W_freq-2] = GRADIENT_OUTPUTS[ti3(n, h, 1, H_out, W_freq) : W_freq-2];
             }
         }
     }
@@ -8157,7 +8320,7 @@ void wipe_out_irrelevant_entries_full(int N, int H, int W, float complex *restri
     }
 }
 
-void fft_conjugate_symmetry_scaling(int N, int K, int H, int W_SPATIAL, float complex *restrict GRADIENT, float complex *restrict SCRATCH){
+void fft_conjugate_symmetry_scaling(int N, int K, int H, int FORWARD, int W_SPATIAL, float complex *restrict GRADIENT, float complex *restrict SCRATCH){
     
     #pragma offload target(mic:MIC_DEV) \ 
         in(GRADIENT:length(0) REUSE) \
@@ -8166,9 +8329,11 @@ void fft_conjugate_symmetry_scaling(int N, int K, int H, int W_SPATIAL, float co
         int W_HALF = W_SPATIAL/2 + 1;
         int IS_EVEN = W_SPATIAL/2 - (W_SPATIAL - 1)/2; // 1 if even, 0 if offloaded
         int nk, h, w;
+        float CONST = 2.0;
+        if (FORWARD == 0) CONST = 0.5;
         // SCRATCH[0 : N*K*H*W_HALF] = GRADIENT[0 : N*K*H*W_HALF];
        
-        #pragma omp parallel for private(nk, h, w) shared(GRADIENT, N, K, H, W_SPATIAL, W_HALF, SCRATCH)
+        #pragma omp parallel for private(nk, h, w) shared(GRADIENT, N, K, H, W_SPATIAL, W_HALF, CONST, SCRATCH)
         for (nk = 0; nk < N*K; nk++){
             int n = nk/K;
             int k = md(nk, K);
@@ -8178,7 +8343,8 @@ void fft_conjugate_symmetry_scaling(int N, int K, int H, int W_SPATIAL, float co
                 for (w = 0; w < W_HALF; w++){ // scan over all elements that have been removed due to conjugate symmetry
                     // GRADIENT[ti(n, k, h, w, K, H, W_HALF)] += conjf(SCRATCH[ti(n, k, h, w, K, H, W_HALF)]);
                     
-                    GRADIENT[ti(n, k, h, w, K, H, W_HALF)] *= (double complex) 2.f + 0.f*I;
+                    // GRADIENT[ti(n, k, h, w, K, H, W_HALF)] *= (double complex) 2.f + 0.f*I;
+                    GRADIENT[ti(n, k, h, w, K, H, W_HALF)] *= CONST;
                     
                     // GRADIENT[ti(n, k, h, w, K, H, W_HALF)] += -2.*I*cimagf(GRADIENT[ti(n, k, h, w, K, H, W_HALF)]);
                     // GRADIENT[ti(n, k, h, w, K, H, W_HALF)] += -I*crealf(GRADIENT[ti(n, k, h, w, K, H, W_HALF)]);
@@ -8188,10 +8354,10 @@ void fft_conjugate_symmetry_scaling(int N, int K, int H, int W_SPATIAL, float co
                 // }
             }
 
-            GRADIENT[ti(n, k, 0, 0, K, H, W_HALF)] *= 0.5;
-            GRADIENT[ti(n, k, H/2, 0, K, H, W_HALF)] *= 0.5;
-            GRADIENT[ti(n, k, 0, W_HALF-1, K, H, W_HALF)] *= 0.5;
-            GRADIENT[ti(n, k, H/2, W_HALF-1, K, H, W_HALF)] *= 0.5;
+            GRADIENT[ti(n, k, 0, 0, K, H, W_HALF)] *= 1.0/CONST;
+            GRADIENT[ti(n, k, H/2, 0, K, H, W_HALF)] *= 1.0/CONST;
+            GRADIENT[ti(n, k, 0, W_HALF-1, K, H, W_HALF)] *= 1.0/CONST;
+            GRADIENT[ti(n, k, H/2, W_HALF-1, K, H, W_HALF)] *= 1.0/CONST;
 
             // int w = W_HALF-1;
             // for (int h = H/2+1; h < H; h++) INPUTS[ti(n, k, h, w, K, H, W_HALF)] *= 2.;

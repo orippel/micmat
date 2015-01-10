@@ -24,15 +24,15 @@ def main():
     examine_convolution = True
     examine_local = False
 
-    time_and_dont_test = True
-    time_and_dont_test_grad = True
+    time_and_dont_test = False
+    time_and_dont_test_grad = False
     test_gradient = True
     offload = True
     
     if time_and_dont_test:
         if examine_convolution:
-            N_block = 16
-            K_block = 4
+            N_block = 1
+            K_block = 32
             C_block = 1
 
             N_block_grad = None
@@ -77,11 +77,11 @@ def main():
         W_arg_block_grad = None # will set to be output_W
         Y_block_grad = 1
 
-        N_block = 16
-        K_block = 4
+        N_block = 1
+        K_block = 32
         C_block = 1
         N = 128
-        K = 16
+        K = 32
         c = 16
         H = 7
         W = 7
@@ -112,7 +112,60 @@ def main():
 
     C.check_mic_status()
 
+    # scratch.frac_nan()
     # test_fft(scratch)
+
+
+    # inputs.shape = (1, np.product(shape))
+    # print inputs
+    # inputs.shape = shape
+
+    # inputs.rgb_to_hsv(outputs, scratch)
+    # outputs.shape = (1, np.product(shape))
+    # print outputs
+    # outputs.shape = shape
+
+    # inputs_copy = inputs.deepcopy().fill_zeros()
+    # outputs.hsv_to_rgb(inputs_copy, scratch)
+    # inputs_copy.shape = (1, np.product(shape))
+    # print inputs_copy
+    # inputs_copy.shape = shape
+
+    ########
+    # shape = (2000, 3, 1, 1)
+    # inputs = C.MICMat(shape).offload_mic().fill_zeros()
+    # outputs = inputs.deepcopy()
+    # inputs.fill_randn(stream, 180.0, 60.0)
+    # inputs.clip_low(0.0)
+    # inputs.scale(-1.).clip_low(-255.0).scale(-1.)
+    # # print inputs
+    # inputs.shape = (1, np.product(shape))
+    # print inputs
+    # inputs.shape = shape
+
+    # inputs.rgb_to_hsv(outputs, scratch)
+    # outputs.shape = (1, np.product(shape))
+    # print outputs
+    # outputs.shape = shape
+    
+    # inputs_copy = inputs.deepcopy().fill_zeros()
+    # inputs_copy.clip_low(0.0)
+    # inputs_copy.scale(-1.).clip_low(-255.0).scale(-1.)
+    # outputs.hsv_to_rgb(inputs_copy, scratch)
+    # print (inputs - inputs_copy).abs().mean()
+    # inputs_copy.shape = (1, np.product(shape))
+    # print inputs_copy
+    # inputs_copy.shape = shape
+
+    # inputs_np = inputs.ndarray()
+    # inputs_copy_np = inputs_copy.ndarray()
+    # diff = abs(inputs_np - inputs_copy_np).flatten()
+    # arg = diff.argmax()
+    # arg = (arg/3) * 3
+
+    # print inputs_np.flatten()[arg:arg+3]
+    # print outputs.ndarray().flatten()[arg:arg+3]
+    # print inputs_copy_np.flatten()[arg:arg+3]
 
     # C.initialize_locks()
     if examine_convolution:
@@ -438,7 +491,27 @@ def recompile_MICMat(N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooli
 
 
 def test_fft(scratch):
-    H, W = 6, 6
+    H, W = 15, 15
+    band_H, band_W = 6, 6
+    inputs = C.MICMat((1, 1, band_H, band_W)).offload_mic().fill_randn(stream, 0., 1.)
+    outputs = C.MICMat((1, 1, H, W)).offload_mic().fill_zeros()
+    frequencies = C.MICMat((1, 1, H, 2*(W/2 + 1))).offload_mic().fill_zeros()
+    pooled_frequencies = C.MICMat((1, 1, band_H, 2*(band_W/2 + 1))).offload_mic().fill_zeros()
+
+    inputs.fft(pooled_frequencies)
+    pooled_frequencies.wipe_out_irrelevant_entries()
+    frequencies.low_pass_filter_gradient(pooled_frequencies, band_H, band_W)
+    real, imaginary = pooled_frequencies.real_and_imaginary()
+    print real
+    print imaginary
+    
+    real, imaginary = frequencies.real_and_imaginary()
+    print real
+    print imaginary
+
+    pooled_frequencies.ifft(outputs)
+    assert 2 == 1
+
     # outputs = C.MICMat((1, 1, H, W)).offload_mic().fill_zeros()
     # inputs = C.MICMat((1, 1, H, 2*(W/2 + 1))).offload_mic().fill_randn(stream, 0., 1.)
     # inputs.wipe_out_irrelevant_entries()
@@ -609,12 +682,12 @@ def test_convolution(time_and_dont_test, time_and_dont_test_grad, test_gradient,
     num_operations_argmax = N*K*c*pooled_H*pooled_W*Y*X*2
     num_operations_gradient = N*K*c*pooled_H*pooled_W*Y*X*2
 
-    inputs = C.MICMat((c, H, W, N))
+    inputs = C.MICMat((N, c, H, W))
     inputs.fill_zeros()
     
     filters = C.MICMat((K_preshadow, c, Y, X))
     filters.fill_zeros()
-    outputs = C.MICMat((K, pooled_H, pooled_W, N))
+    outputs = C.MICMat((N, K, pooled_H, pooled_W))
     argmaxs = outputs.deepcopy().offload_mic().astype('int')
     
     if offload:
@@ -627,69 +700,40 @@ def test_convolution(time_and_dont_test, time_and_dont_test_grad, test_gradient,
         filters.fill_randn(stream, 0., 1.)
 
     print 'Computing convolution now.'
+    filters_rotated = scratch.reset(filters.shape)
+    filters_interleaved = scratch.append(filters.shape)
+    inputs_rotated = scratch.append(inputs.shape)
+    inputs_interleaved = scratch.append(inputs.shape)
+    outputs_interleaved = scratch.append(outputs.shape)
+    outputs_rotated = scratch.append(outputs.shape)
+                
+    scratch.update_end()
 
+    outputs_interleaved.shape = outputs_interleaved.shape[1:] + (outputs_interleaved.shape[0],)
+    outputs_interleaved.shape = (outputs_interleaved.shape[-1]/N_block,) + outputs_interleaved.shape[0:-1] + (N_block,)
+
+    argmaxs.shape = argmaxs.shape[1:] + (argmaxs.shape[0],)
+    argmaxs.shape = (argmaxs.shape[-1]/N_block,) + argmaxs.shape[0:-1] + (N_block,)
+
+    inputs.rotate_dimensions('forward', inputs_rotated)
+    inputs_rotated.interleave_block(N_block, inputs_interleaved)
+
+    filters.rotate_dimensions('forward', filters_rotated)
+    filters_rotated.interleave_block(K_block, filters_interleaved)    
+
+    print 'Done data conversions.'
     timer.tic()
-    inputs.interleave_block(N_block, scratch)
-    input_interleave_time = timer.toc()
-
-    timer.tic()
-    outputs.interleave_block(N_block, scratch)
-    output_interleave_time = timer.toc()
-
-    timer.tic()
-    argmaxs.interleave_block(N_block, scratch)
-    argmax_interleave_time = timer.toc()
-    
-    timer.tic()
-    filters.rotate_dimensions('forward', scratch)
-    rotation_time = timer.toc()
-
-    timer.tic()
-    filters.interleave_block(K_block, scratch)
-    filter_interleave_time = timer.toc()
-
-
-
-
-    
-    timer.tic()
-    outputs.convolution(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, False, scratch)
+    outputs_interleaved.convolution(inputs_interleaved, filters_interleaved, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, False, scratch.end)
     # outputs.convolve_and_pool_replace(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, False, scratch, shadow)
     test_time = timer.toc()
+    print 'Done convolution.'
 
-    timer.tic()
-    inputs.uninterleave_block(scratch)
-    input_uninterleave_time = timer.toc()
+    outputs_interleaved.uninterleave_block(outputs_rotated)
+    outputs_rotated.rotate_dimensions('backward', outputs)
 
-    timer.tic()
-    outputs.uninterleave_block(scratch)
-    output_uninterleave_time = timer.toc()
+    argmaxs.uninterleave_block(scratch.end)
+    argmaxs.rotate_dimensions('backward', scratch.end)
 
-    timer.tic()
-    argmaxs.uninterleave_block(scratch)
-    argmax_uninterleave_time = timer.toc()
-    
-    timer.tic()
-    filters.uninterleave_block(scratch)
-    filter_uninterleave_time = timer.toc()
-
-    timer.tic()
-    filters.rotate_dimensions('backward', scratch)
-    rotation_backward_time = timer.toc()
-    # print outputs
-
-    print 'Input interleaving time: %f seconds.' % input_interleave_time
-    print 'Output interleaving time: %f seconds.' % output_interleave_time
-    print 'Argmax interleaving time: %f seconds.' % argmax_interleave_time
-    print 'Filter interleaving time: %f seconds.\n' % filter_interleave_time
-
-    print 'Input un-interleaving time: %f seconds.' % input_uninterleave_time
-    print 'Output un-interleaving time: %f seconds.' % output_uninterleave_time
-    print 'Argmax un-interleaving time: %f seconds.' % argmax_uninterleave_time
-    print 'Filter un-interleaving time: %f seconds.\n' % filter_uninterleave_time
-
-    print 'Rotation time: %f seconds.' % rotation_time
-    print 'Rotation backward time: %f seconds.' % rotation_backward_time
     print '\n \nConvolution time: %f seconds.' % test_time
     print 'Speed: %f Gflops.' % (num_operations/test_time*1e-9)
 
@@ -701,7 +745,7 @@ def test_convolution(time_and_dont_test, time_and_dont_test_grad, test_gradient,
 
     if not time_and_dont_test:
         print 'Running convolution test. '
-        inputs_np = np.lib.pad(inputs.ndarray(), ((0, 0), (padding, padding), (padding, padding), (0, 0)), 'constant', constant_values = (0, 0))
+        inputs_np = np.lib.pad(inputs_rotated.ndarray(), ((0, 0), (padding, padding), (padding, padding), (0, 0)), 'constant', constant_values = (0, 0))
 
         filters_np = filters.ndarray()
         outputs_np = np.zeros((K, output_H, output_W, N)) - 1e10        
@@ -723,108 +767,342 @@ def test_convolution(time_and_dont_test, time_and_dont_test_grad, test_gradient,
                         w_end = min(w_start + pooling_radius, output_W)
                         pooled_outputs_np[k, h, w, n] = np.amax(outputs_np[k, h_start:h_end, w_start:w_end, n])
 
-        difference = np.mean(np.abs(outputs.ndarray() - pooled_outputs_np))
+        difference = np.mean(np.abs(outputs_rotated.ndarray() - pooled_outputs_np))
         if difference < 1.e-6:
             print 'Convolution test passed. '
 
         else:
             print 'Convolution test failed with difference %f. ' % difference
-            print (outputs.ndarray() - pooled_outputs_np)[0, 0, :, :]
-            print ''
+            # print (outputs.ndarray() - pooled_outputs_np)[0, 0, :, :]
+            # print ''
             
-            for k in range(K):
-                # for n in range(N):
-                    # print (k, n)
-                print outputs.ndarray()[k, :, :, n]
-                print ''
-                print pooled_outputs_np[k, :, :, n]
-                print ''
-                print (outputs.ndarray() - pooled_outputs_np)[k, :, :, n]
-                print ''
+            # for k in range(K):
+            #     # for n in range(N):
+            #         # print (k, n)
+            #     print outputs.ndarray()[k, :, :, n]
+            #     print ''
+            #     print pooled_outputs_np[k, :, :, n]
+            #     print ''
+            #     print (outputs.ndarray() - pooled_outputs_np)[k, :, :, n]
+            #     print ''
 
-            print outputs
-            print np.reshape(pooled_outputs_np[0, 0, :, :], pooled_outputs_np.shape[2:])
+            # print outputs
+            # print np.reshape(pooled_outputs_np[0, 0, :, :], pooled_outputs_np.shape[2:])
 
     if test_gradient:
         print '\n\n\n'
         print '='*20
         print 'Computing convolution gradient now.' 
-        timer.tic()
-        inputs.rotate_dimensions('backward', scratch)
-        time = timer.toc()
-        print 'Gradient input rotation time: %f seconds.' % time            
+        gradient_filters = filters.deepcopy().fill_zeros()
+        gradient_inputs = inputs.deepcopy().fill_zeros()
+        gradient_outputs = outputs.deepcopy().fill_randn(stream, 0., 1.)
 
-        timer.tic()
-        outputs.rotate_dimensions('backward', scratch)
-        time = timer.toc()
-        print 'Gradient output rotation time: %f seconds.' % time
+        # filters_rotated = scratch.reset(filters.shape)
+        # filters_interleaved = scratch.append(filters.shape)
+        # inputs_rotated = scratch.append(inputs.shape)
+        # inputs_interleaved = scratch.append(inputs.shape)
+        # outputs_interleaved = scratch.append(outputs.shape)
+        # outputs_rotated = scratch.append(outputs.shape)
+                    
+        # scratch.update_end()
 
-        timer.tic()
-        argmaxs.rotate_dimensions('backward', scratch)
-        time = timer.toc()
-        print 'Gradient argmax rotation time: %f seconds.' % time
+        # outputs_interleaved.shape = outputs_interleaved.shape[1:] + (outputs_interleaved.shape[0],)
+        # outputs_interleaved.shape = (outputs_interleaved.shape[-1]/N_block,) + outputs_interleaved.shape[0:-1] + (N_block,)
 
-        timer.tic()
-        inputs.interleave_for_gradient(C_block_grad, scratch)
-        time = timer.toc()
-        print 'Gradient input interleaving time: %f seconds.' % time
-        assert Y_block_grad == 1
+        # inputs.rotate_dimensions('forward', inputs_rotated)
+        # inputs_rotated.interleave_block(N_block, inputs_interleaved)
 
-        timer.tic()
-        filters.permute_dimensions((2, 0, 3, 1), scratch)
-        time = timer.toc()
-        print 'Gradient filter permutation time: %f seconds.' % time
+        # filters.rotate_dimensions('forward', filters_rotated)
+        # filters_rotated.interleave_block(K_block, filters_interleaved)    
 
-        # filters shape [C/C_BLOCK, Y, K, X, C_BLOCK]
-        timer.tic()
-        filters.interleave_block(C_block_grad, scratch)
-        time = timer.toc()
-        print 'Gradient filter interleaving time: %f seconds.' % time
+        # timer.tic()
+        # # Satish, the routine you're testing goes here
+        # gradient_filters.convolution_gradient(inputs, filters, argmaxs,
+        #     gradient_pooled_outputs, gradient_inputs, stride, padding, pooling_radius, pooling_stride, 1, scratch)
+        # convolution_gradient_time = timer.toc()
 
-        timer.tic()
-        argmaxs.permute_dimensions((0, 2, 3, 1), scratch)
-        time = timer.toc()
-        print 'Gradient argmax permutation time: %f seconds.' % time
-
-        timer.tic()
-        outputs.permute_dimensions((0, 2, 3, 1), scratch) # d_pooled_outputs
-        time = timer.toc()
-        print 'Gradient output permutation time: %f seconds.' % time
-
-        gradient_pooled_outputs = outputs.deepcopy()
-        gradient_filters = filters.deepcopy()
-        gradient_inputs = inputs.deepcopy()
-
-        timer.tic()
-        gradient_filters.convolution_gradient(inputs, filters, argmaxs,
-            gradient_pooled_outputs, gradient_inputs, stride, padding, pooling_radius, pooling_stride, 1, scratch)
-        convolution_gradient_time = timer.toc()
-
-        print '\n \n Time: %f seconds.' % convolution_gradient_time
-        print 'Speed: %f Gflops.' % (num_operations_gradient/convolution_gradient_time*1e-9)
+        # print '\n \n Time: %f seconds.' % convolution_gradient_time
+        # print 'Speed: %f Gflops.' % (num_operations_gradient/convolution_gradient_time*1e-9)
 
         if not time_and_dont_test_grad:
-            # undo incorrect transformation
-            gradient_filters.uninterleave_block(scratch)
-            gradient_filters.permute_dimensions((1, 3, 0, 2), scratch)
+            # compute gradient as already validated
+            inputs_interleaved = scratch.reset(inputs.shape)
+            filters_permuted = scratch.append(filters.shape)
+            filters_interleaved = scratch.append(filters.shape)
+            gradient_permuted = scratch.append(gradient_filters.shape)
+            gradient_interleaved = scratch.append(gradient_filters.shape, fill_zeros = True)
+            gradient_inputs_interleaved = scratch.append(gradient_inputs.shape, fill_zeros = True)
+            gradient_outputs_interleaved = scratch.append(gradient_outputs.shape)
 
-            gradient_filters_tested = gradient_filters.deepcopy()
+            scratch.update_end()
+
+            inputs.interleave_for_gradient(C_block_grad, inputs_interleaved)
+
+            filters.permute_dimensions((2, 0, 3, 1), filters_permuted)
+            filters_permuted.interleave_block(C_block_grad, filters_interleaved)
+
+            gradient_outputs.permute_dimensions((0, 2, 3, 1), gradient_outputs_interleaved) 
+
+            N, c, H, W = gradient_inputs_interleaved.shape    
+            gradient_inputs_interleaved.shape = (N, c/C_block_grad, H, W, C_block_grad)
             
-            #do correct transformation
-            gradient_filters.permute_dimensions((0, 2, 3, 1), scratch)
-        
-            gradient_filters.convolution_gradient(inputs, filters, argmaxs,
-                gradient_pooled_outputs, gradient_inputs, stride, padding, pooling_radius, pooling_stride, 1, scratch)
-        
-            gradient_filters.permute_dimensions((0, 3, 1, 2), scratch)
+            K, c, Y, X = gradient_filters.shape
+            gradient_interleaved.shape = (Y, K, X, c)
+            gradient_interleaved.shape = (gradient_interleaved.shape[-1]/C_block_grad,) + gradient_interleaved.shape[0:-1] + (C_block_grad,)
+
+            argmaxs.permute_dimensions((0, 2, 3, 1), scratch.end)
+
+            gradient_interleaved.convolution_gradient(inputs_interleaved, filters_interleaved, argmaxs,
+                gradient_outputs_interleaved, gradient_inputs_interleaved, stride, padding, 
+                pooling_radius, pooling_stride, 
+                1, scratch.end)
+
+            gradient_interleaved.uninterleave_block(gradient_permuted)
+            gradient_permuted.permute_dimensions((1, 3, 0, 2), gradient_filters)
 
             difference = np.mean(np.abs(gradient_filters.ndarray() - gradient_filters_tested.ndarray()))
 
             print '\n\n'
-            if difference < 1.e-6:
+            if difference < 1.e-4:
                 print 'Gradient test passed. '
             else:
                 print 'Gradient test failed. '
+
+# def test_convolution(time_and_dont_test, time_and_dont_test_grad, test_gradient, offload, N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block, N_block_grad, C_block_grad, H_arg_block_grad, W_arg_block_grad, Y_block_grad):
+#     output_H = (H + 2*padding - Y + 1)/stride
+#     output_W = (W + 2*padding - X + 1)/stride
+#     pooled_H = int(np.ceil((output_H - pooling_radius + 1.)/pooling_stride))
+#     pooled_W = int(np.ceil((output_W - pooling_radius + 1.)/pooling_stride))
+
+#     K_preshadow = K
+#     if shadow:
+#         K *= 2
+
+#     num_operations = N*K*c*output_H*output_W*X*Y*2
+#     num_operations_argmax = N*K*c*pooled_H*pooled_W*Y*X*2
+#     num_operations_gradient = N*K*c*pooled_H*pooled_W*Y*X*2
+
+#     inputs = C.MICMat((c, H, W, N))
+#     inputs.fill_zeros()
+    
+#     filters = C.MICMat((K_preshadow, c, Y, X))
+#     filters.fill_zeros()
+#     outputs = C.MICMat((K, pooled_H, pooled_W, N))
+#     argmaxs = outputs.deepcopy().offload_mic().astype('int')
+    
+#     if offload:
+#         inputs.offload_mic()
+#         inputs.fill_randn(stream, 0., 1.)
+
+#         outputs.offload_mic()
+        
+#         filters.offload_mic()
+#         filters.fill_randn(stream, 0., 1.)
+
+#     print 'Computing convolution now.'
+
+#     timer.tic()
+#     inputs.interleave_block(N_block, scratch)
+#     input_interleave_time = timer.toc()
+#     print 'Done input interleaving.'
+
+#     timer.tic()
+#     outputs.interleave_block(N_block, scratch)
+#     output_interleave_time = timer.toc()
+#     print 'Done output interleaving.'
+
+#     timer.tic()
+#     argmaxs.interleave_block(N_block, scratch)
+#     argmax_interleave_time = timer.toc()
+#     print 'Done argmax interleaving.'
+    
+#     timer.tic()
+#     filters.rotate_dimensions('forward', scratch)
+#     rotation_time = timer.toc()
+#     print 'Done dimension rotation.'
+
+#     timer.tic()
+#     filters.interleave_block(K_block, scratch)
+#     filter_interleave_time = timer.toc()
+#     print 'Done filter interleaving.'
+
+
+
+
+#     print 'Done data conversions.'
+#     timer.tic()
+#     outputs.convolution(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, False, scratch)
+#     # outputs.convolve_and_pool_replace(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, False, scratch, shadow)
+#     test_time = timer.toc()
+#     print 'Done convolution.'
+#     timer.tic()
+#     inputs.uninterleave_block(scratch)
+#     input_uninterleave_time = timer.toc()
+
+#     timer.tic()
+#     outputs.uninterleave_block(scratch)
+#     output_uninterleave_time = timer.toc()
+
+#     timer.tic()
+#     argmaxs.uninterleave_block(scratch)
+#     argmax_uninterleave_time = timer.toc()
+    
+#     timer.tic()
+#     filters.uninterleave_block(scratch)
+#     filter_uninterleave_time = timer.toc()
+
+#     timer.tic()
+#     filters.rotate_dimensions('backward', scratch)
+#     rotation_backward_time = timer.toc()
+#     # print outputs
+
+#     print 'Input interleaving time: %f seconds.' % input_interleave_time
+#     print 'Output interleaving time: %f seconds.' % output_interleave_time
+#     print 'Argmax interleaving time: %f seconds.' % argmax_interleave_time
+#     print 'Filter interleaving time: %f seconds.\n' % filter_interleave_time
+
+#     print 'Input un-interleaving time: %f seconds.' % input_uninterleave_time
+#     print 'Output un-interleaving time: %f seconds.' % output_uninterleave_time
+#     print 'Argmax un-interleaving time: %f seconds.' % argmax_uninterleave_time
+#     print 'Filter un-interleaving time: %f seconds.\n' % filter_uninterleave_time
+
+#     print 'Rotation time: %f seconds.' % rotation_time
+#     print 'Rotation backward time: %f seconds.' % rotation_backward_time
+#     print '\n \nConvolution time: %f seconds.' % test_time
+#     print 'Speed: %f Gflops.' % (num_operations/test_time*1e-9)
+
+#     # timer.tic()
+#     # outputs.convolve_and_pool_replace(inputs, filters, argmaxs, stride, padding, pooling_radius, pooling_stride, 1, True, scratch, shadow)
+#     # fixed_time = timer.toc()
+
+#     # print outputs
+
+#     if not time_and_dont_test:
+#         print 'Running convolution test. '
+#         inputs_np = np.lib.pad(inputs.ndarray(), ((0, 0), (padding, padding), (padding, padding), (0, 0)), 'constant', constant_values = (0, 0))
+
+#         filters_np = filters.ndarray()
+#         outputs_np = np.zeros((K, output_H, output_W, N)) - 1e10        
+#         pooled_outputs_np = np.zeros((K, pooled_H, pooled_W, N))
+
+#         for k in range(K):
+#             for h in range(output_H):
+#                 for w in range(output_W):
+#                     for n in range(N):
+#                         outputs_np[k, h, w, n] = np.sum(np.multiply(inputs_np[:, h:h+Y, w:w+X, n], filters_np[k, :, :, :]))
+
+#         for k in range(K):
+#             for h in range(pooled_H):
+#                 for w in range(pooled_W):
+#                     for n in range(N):
+#                         h_start = h*pooling_stride
+#                         h_end = min(h_start + pooling_radius, output_H)
+#                         w_start = w*pooling_stride
+#                         w_end = min(w_start + pooling_radius, output_W)
+#                         pooled_outputs_np[k, h, w, n] = np.amax(outputs_np[k, h_start:h_end, w_start:w_end, n])
+
+#         difference = np.mean(np.abs(outputs.ndarray() - pooled_outputs_np))
+#         if difference < 1.e-6:
+#             print 'Convolution test passed. '
+
+#         else:
+#             print 'Convolution test failed with difference %f. ' % difference
+#             print (outputs.ndarray() - pooled_outputs_np)[0, 0, :, :]
+#             print ''
+            
+#             for k in range(K):
+#                 # for n in range(N):
+#                     # print (k, n)
+#                 print outputs.ndarray()[k, :, :, n]
+#                 print ''
+#                 print pooled_outputs_np[k, :, :, n]
+#                 print ''
+#                 print (outputs.ndarray() - pooled_outputs_np)[k, :, :, n]
+#                 print ''
+
+#             print outputs
+#             print np.reshape(pooled_outputs_np[0, 0, :, :], pooled_outputs_np.shape[2:])
+
+#     if test_gradient:
+#         print '\n\n\n'
+#         print '='*20
+#         print 'Computing convolution gradient now.' 
+#         timer.tic()
+#         inputs.rotate_dimensions('backward', scratch)
+#         time = timer.toc()
+#         print 'Gradient input rotation time: %f seconds.' % time            
+
+#         timer.tic()
+#         outputs.rotate_dimensions('backward', scratch)
+#         time = timer.toc()
+#         print 'Gradient output rotation time: %f seconds.' % time
+
+#         timer.tic()
+#         argmaxs.rotate_dimensions('backward', scratch)
+#         time = timer.toc()
+#         print 'Gradient argmax rotation time: %f seconds.' % time
+
+#         timer.tic()
+#         inputs.interleave_for_gradient(C_block_grad, scratch)
+#         time = timer.toc()
+#         print 'Gradient input interleaving time: %f seconds.' % time
+#         assert Y_block_grad == 1
+
+#         timer.tic()
+#         filters.permute_dimensions((2, 0, 3, 1), scratch)
+#         time = timer.toc()
+#         print 'Gradient filter permutation time: %f seconds.' % time
+
+#         # filters shape [C/C_BLOCK, Y, K, X, C_BLOCK]
+#         timer.tic()
+#         filters.interleave_block(C_block_grad, scratch)
+#         time = timer.toc()
+#         print 'Gradient filter interleaving time: %f seconds.' % time
+
+#         timer.tic()
+#         argmaxs.permute_dimensions((0, 2, 3, 1), scratch)
+#         time = timer.toc()
+#         print 'Gradient argmax permutation time: %f seconds.' % time
+
+#         timer.tic()
+#         outputs.permute_dimensions((0, 2, 3, 1), scratch) # d_pooled_outputs
+#         time = timer.toc()
+#         print 'Gradient output permutation time: %f seconds.' % time
+
+#         gradient_pooled_outputs = outputs.deepcopy()
+#         gradient_filters = filters.deepcopy()
+#         gradient_inputs = inputs.deepcopy()
+
+#         timer.tic()
+#         gradient_filters.convolution_gradient(inputs, filters, argmaxs,
+#             gradient_pooled_outputs, gradient_inputs, stride, padding, pooling_radius, pooling_stride, 1, scratch)
+#         convolution_gradient_time = timer.toc()
+
+#         print '\n \n Time: %f seconds.' % convolution_gradient_time
+#         print 'Speed: %f Gflops.' % (num_operations_gradient/convolution_gradient_time*1e-9)
+
+#         if not time_and_dont_test_grad:
+#             # undo incorrect transformation
+#             gradient_filters.uninterleave_block(scratch)
+#             gradient_filters.permute_dimensions((1, 3, 0, 2), scratch)
+
+#             gradient_filters_tested = gradient_filters.deepcopy()
+            
+#             #do correct transformation
+#             gradient_filters.permute_dimensions((0, 2, 3, 1), scratch)
+        
+#             gradient_filters.convolution_gradient(inputs, filters, argmaxs,
+#                 gradient_pooled_outputs, gradient_inputs, stride, padding, pooling_radius, pooling_stride, 1, scratch)
+        
+#             gradient_filters.permute_dimensions((0, 3, 1, 2), scratch)
+
+#             difference = np.mean(np.abs(gradient_filters.ndarray() - gradient_filters_tested.ndarray()))
+
+#             print '\n\n'
+#             if difference < 1.e-6:
+#                 print 'Gradient test passed. '
+#             else:
+#                 print 'Gradient test failed. '
 
 
 def test_local(time_and_dont_test, test_gradient, offload, N, K, c, H, W, X, Y, stride, padding, pooling_radius, pooling_stride, scratch, shadow, N_block, K_block, C_block):
